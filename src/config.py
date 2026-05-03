@@ -14,15 +14,35 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class HyperliquidConfig(BaseModel):
+    """HL API 設定.
+
+    Phase 0 dry-run で判明した HIP-3 仕様 (2026-05-04):
+    - Trade[XYZ] デプロイの米株 perp は dex="xyz" + ticker prefix "xyz:..." を使用
+    - core perp (BTC/ETH 等) は dex="" がデフォルト
+    - core perp は dex 引数省略可だが、本プロジェクトでは明示的に分離管理する
+    """
+
     info_api_url: str = "https://api.hyperliquid.xyz/info"
     ws_url: str = "wss://api.hyperliquid.xyz/ws"
-    symbols: list[str] = Field(default_factory=lambda: ["SP500", "XYZ100", "BTC", "ETH"])
+
+    # HIP-3 dex 名 (Trade[XYZ] = "xyz", core = "")
+    xyz_dex_name: str = "xyz"
+
+    # symbols は分離管理 (それぞれ別の REST polling が必要)
+    xyz_symbols: list[str] = Field(default_factory=lambda: ["xyz:SP500", "xyz:XYZ100"])
+    core_symbols: list[str] = Field(default_factory=lambda: ["BTC", "ETH"])
+
     rest_poll_interval_sec: int = 60
     l2book_snapshot_interval_sec: int = 5
     l2book_levels: int = 10
     ws_reconnect_max_attempts: int = 100
     ws_reconnect_backoff_initial_sec: float = 1.0
     ws_reconnect_backoff_max_sec: float = 60.0
+    ws_stable_uptime_sec: float = 30.0  # Gemini Bug 1: backoff reset 条件
+
+    @property
+    def all_symbols(self) -> list[str]:
+        return [*self.xyz_symbols, *self.core_symbols]
 
 
 class StorageConfig(BaseModel):

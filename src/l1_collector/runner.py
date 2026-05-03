@@ -1,19 +1,18 @@
 """L1 統合 runner: WS + REST + storage を組み合わせた1プロセス.
 
-使い方:
-    python -m src.l1_collector
-
 挙動:
-- WS から l2book / trades をストリーム受信、5秒ごとにスナップショットを Parquet 書き出し
-- REST から 1分ごとに metaAndAssetCtxs → AssetCtx Parquet 書き出し
+- WS から l2book / trades をストリーム受信、約1分ごとに Parquet flush
+- REST から 1分ごとに metaAndAssetCtxs (core + xyz) を取得して Parquet 書き出し
 - gap event は gap_recovery で REST snapshot 取得して raw に追加保存
 - 5分ごと heartbeat ログ
+- SIGINT / SIGTERM で graceful shutdown (Issue #30): 残バッファを最終 flush して exit
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import signal
 from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
 
@@ -38,15 +37,16 @@ def _l2_to_row(s: L2BookSnapshot) -> dict:
         "symbol": s.symbol,
         "exchange_ts": s.exchange_ts,
         "recv_ts": s.recv_ts,
-        "sequence": s.sequence,
         "is_recovery_snapshot": s.is_recovery_snapshot,
         "best_bid": s.best_bid,
         "best_ask": s.best_ask,
         "mid": s.mid,
         "bid_pxs": [b.px for b in s.bids],
         "bid_szs": [b.sz for b in s.bids],
+        "bid_ns": [b.n for b in s.bids],
         "ask_pxs": [a.px for a in s.asks],
         "ask_szs": [a.sz for a in s.asks],
+        "ask_ns": [a.n for a in s.asks],
     }
 
 
@@ -59,6 +59,9 @@ def _trade_to_row(t: TradeEvent) -> dict:
         "sz": t.sz,
         "side": t.side,
         "trade_id": str(t.trade_id) if t.trade_id is not None else None,
+        "buyer": t.buyer,
+        "seller": t.seller,
+        "hash": t.hash_,
     }
 
 
@@ -66,13 +69,18 @@ def _ctx_to_row(c: AssetCtx) -> dict:
     return {
         "symbol": c.symbol,
         "poll_ts": c.poll_ts,
+        "dex": c.dex,
         "mark_px": c.mark_px,
         "oracle_px": c.oracle_px,
+        "mid_px": c.mid_px,
         "funding_rate": c.funding_rate,
+        "premium": c.premium,
         "open_interest": c.open_interest,
         "day_volume": c.day_volume,
-        "impact_bid_px": c.impact_pxs[0] if c.impact_pxs else None,
-        "impact_ask_px": c.impact_pxs[1] if c.impact_pxs else None,
+        "day_base_volume": c.day_base_volume,
+        "prev_day_px": c.prev_day_px,
+        "impact_bid_px": c.impact_bid_px,
+        "impact_ask_px": c.impact_ask_px,
     }
 
 
@@ -85,99 +93,171 @@ class L1Runner:
         self.rest = HLRestClient(cfg.hyperliquid)
         self.gap = GapRecovery(self.rest)
 
-        # メモリバッファ (定期 flush)
+        # メモリバッファ (定期 flush). swap 方式で書き込み競合を回避 (Bug 4).
         self._l2_buf: deque[dict] = deque()
         self._trade_buf: deque[dict] = deque()
         self._ctx_buf: deque[dict] = deque()
 
-        # heartbeat 用カウンタ
         self._counts: dict[str, int] = defaultdict(int)
         self._last_seen: dict[str, datetime] = {}
+        self._stop = asyncio.Event()
+        # gap recovery を fire-and-forget するためのタスク集合 (Bug B 修正)
+        self._gap_tasks: set[asyncio.Task] = set()
+
+    def request_stop(self) -> None:
+        """SIGINT/SIGTERM ハンドラから呼ぶ."""
+        log.warning("l1.shutdown_requested")
+        self._stop.set()
 
     async def run(self) -> None:
-        """並列タスクを起動して停止信号を待つ."""
+        """並列タスクを起動し, stop event で全て停止 → 最終 flush."""
+        tasks = [
+            asyncio.create_task(self._run_ws(), name="ws"),
+            asyncio.create_task(self._run_rest_poll(), name="rest"),
+            asyncio.create_task(self._run_flusher(), name="flusher"),
+            asyncio.create_task(self._run_heartbeat(), name="heartbeat"),
+        ]
         try:
-            await asyncio.gather(
-                self._run_ws(),
-                self._run_rest_poll(),
-                self._run_flusher(),
-                self._run_heartbeat(),
-            )
+            await self._stop.wait()
         finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # 進行中の gap recovery を最大 5 秒待つ
+            if self._gap_tasks:
+                await asyncio.gather(*self._gap_tasks, return_exceptions=True)
+            await self._flush_all()
             await self.rest.close()
+            log.info("l1.stopped")
 
     async def _run_ws(self) -> None:
-        async for ev in self.ws.stream():
-            self._counts[type(ev).__name__] += 1
-            if isinstance(ev, L2BookSnapshot):
-                self._l2_buf.append(_l2_to_row(ev))
-                self._last_seen[ev.symbol] = ev.recv_ts
-            elif isinstance(ev, TradeEvent):
-                self._trade_buf.append(_trade_to_row(ev))
-                self._last_seen[ev.symbol] = ev.recv_ts
-            elif isinstance(ev, GapEvent):
-                snap = await self.gap.recover(ev)
-                if snap is not None:
-                    self._l2_buf.append(_l2_to_row(snap))
+        """WS 受信ループ.
+
+        Gemini指摘 (Bug B) 反映: GapEvent 発生時の REST recover は別タスクに
+        投げる (fire-and-forget). 直列 await すると WS 受信がブロックされる.
+        """
+        try:
+            async for ev in self.ws.stream():
+                if self._stop.is_set():
+                    return
+                self._counts[type(ev).__name__] += 1
+                if isinstance(ev, L2BookSnapshot):
+                    self._l2_buf.append(_l2_to_row(ev))
+                    self._last_seen[ev.symbol] = ev.recv_ts
+                elif isinstance(ev, TradeEvent):
+                    self._trade_buf.append(_trade_to_row(ev))
+                    self._last_seen[ev.symbol] = ev.recv_ts
+                elif isinstance(ev, GapEvent):
+                    # 別タスクで REST snapshot 取得 → 結果を _l2_buf に追加
+                    task = asyncio.create_task(self._recover_and_append(ev))
+                    self._gap_tasks.add(task)
+                    task.add_done_callback(self._gap_tasks.discard)
+        except asyncio.CancelledError:
+            return
+
+    async def _recover_and_append(self, ev: GapEvent) -> None:
+        try:
+            snap = await self.gap.recover(ev)
+            if snap is not None:
+                self._l2_buf.append(_l2_to_row(snap))
+        except Exception as exc:
+            log.warning("gap.recover_task_failed", symbol=ev.symbol, error=str(exc))
 
     async def _run_rest_poll(self) -> None:
-        async for ctxs in self.rest.stream_asset_ctxs():
-            for c in ctxs:
-                self._ctx_buf.append(_ctx_to_row(c))
-                self._counts["AssetCtx"] += 1
+        try:
+            async for ctxs in self.rest.stream_asset_ctxs():
+                if self._stop.is_set():
+                    return
+                for c in ctxs:
+                    self._ctx_buf.append(_ctx_to_row(c))
+                    self._counts["AssetCtx"] += 1
+        except asyncio.CancelledError:
+            return
 
     async def _run_flusher(self) -> None:
-        """1分ごとにバッファを Parquet に flush."""
-        while True:
-            await asyncio.sleep(60)
-            await self._flush_all()
+        try:
+            while not self._stop.is_set():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), timeout=60)
+                await self._flush_all()
+        except asyncio.CancelledError:
+            return
 
     async def _flush_all(self) -> None:
-        """Gemini指摘 (Bug 4) 反映: deque を新オブジェクトに swap してから flush.
+        """deque を新オブジェクトに swap してから flush.
 
-        list(buf); buf.clear() の方式では理屈上書き手とのレースが残る.
-        新 deque に挿げ替えてから旧 deque を処理することで完全に分離する.
+        Bug 4: deque swap で書き込み競合を回避.
+        Gemini Bug C: 同期 I/O (PyArrow) は asyncio.to_thread でオフロードして
+        イベントループのブロックを防ぐ.
         """
-        # L2
         old_l2, self._l2_buf = self._l2_buf, deque()
-        if old_l2:
-            write_parquet_atomic(list(old_l2), "l2book", self.cfg.storage)
-        # trades
         old_trades, self._trade_buf = self._trade_buf, deque()
-        if old_trades:
-            write_parquet_atomic(list(old_trades), "trades", self.cfg.storage)
-        # ctxs
         old_ctxs, self._ctx_buf = self._ctx_buf, deque()
+
+        coros = []
+        if old_l2:
+            coros.append(
+                asyncio.to_thread(write_parquet_atomic, list(old_l2), "l2book", self.cfg.storage)
+            )
+        if old_trades:
+            coros.append(
+                asyncio.to_thread(
+                    write_parquet_atomic,
+                    list(old_trades),
+                    "trades",
+                    self.cfg.storage,
+                )
+            )
         if old_ctxs:
-            write_parquet_atomic(list(old_ctxs), "asset_ctxs", self.cfg.storage)
+            coros.append(
+                asyncio.to_thread(
+                    write_parquet_atomic,
+                    list(old_ctxs),
+                    "asset_ctxs",
+                    self.cfg.storage,
+                )
+            )
+        if coros:
+            await asyncio.gather(*coros, return_exceptions=True)
 
     async def _run_heartbeat(self) -> None:
         interval = self.cfg.logging.heartbeat_interval_sec
         threshold = timedelta(minutes=10)
-        while True:
-            await asyncio.sleep(interval)
-            now = datetime.now(UTC)
-            stale: list[str] = []
-            for sym, last in self._last_seen.items():
-                if now - last > threshold:
-                    stale.append(sym)
-            log.info(
-                "heartbeat",
-                counts=dict(self._counts),
-                stale_symbols=stale,
-                buffer_l2=len(self._l2_buf),
-                buffer_trades=len(self._trade_buf),
-                buffer_ctxs=len(self._ctx_buf),
-            )
+        try:
+            while not self._stop.is_set():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                now = datetime.now(UTC)
+                stale = [sym for sym, last in self._last_seen.items() if now - last > threshold]
+                log.info(
+                    "heartbeat",
+                    counts=dict(self._counts),
+                    stale_symbols=stale,
+                    buffer_l2=len(self._l2_buf),
+                    buffer_trades=len(self._trade_buf),
+                    buffer_ctxs=len(self._ctx_buf),
+                )
+        except asyncio.CancelledError:
+            return
+
+
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop, runner: L1Runner) -> None:
+    """SIGINT / SIGTERM で graceful shutdown (Issue #30)."""
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, runner.request_stop)
+        except NotImplementedError:
+            # Windows 等
+            signal.signal(sig, lambda *_: runner.request_stop())
 
 
 async def _amain(cfg: AppConfig) -> None:
     runner = L1Runner(cfg)
-    log.info("l1.start", symbols=cfg.hyperliquid.symbols)
+    loop = asyncio.get_running_loop()
+    _install_signal_handlers(loop, runner)
+    log.info("l1.start", symbols=cfg.hyperliquid.all_symbols)
     with contextlib.suppress(KeyboardInterrupt):
         await runner.run()
-    await runner._flush_all()
-    log.info("l1.stop")
 
 
 def main() -> None:
