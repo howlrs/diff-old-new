@@ -1,0 +1,41 @@
+# diff-old-new デフォルト設定
+# local override は config/local.yaml で。環境変数 DON_<FIELD> も可。
+
+hyperliquid:
+  info_api_url: https://api.hyperliquid.xyz/info
+  ws_url: wss://api.hyperliquid.xyz/ws
+  symbols:
+    - SP500
+    - XYZ100
+    - BTC
+    - ETH
+  rest_poll_interval_sec: 60
+  l2book_snapshot_interval_sec: 5
+  l2book_levels: 10
+  ws_reconnect_max_attempts: 100
+  ws_reconnect_backoff_initial_sec: 1.0
+  ws_reconnect_backoff_max_sec: 60.0
+
+storage:
+  raw_data_root: data/raw
+  curated_data_root: data/curated
+  parquet_compression: zstd
+
+regime:
+  active_start_weekday: 6   # Sunday
+  active_start_hour_et: 20
+  active_end_weekday: 4     # Friday
+  active_end_hour_et: 20
+  cme_maintenance_start_hour_et: 17
+  cme_maintenance_end_hour_et: 18
+  boundary_buffer_minutes: 5
+
+cost:
+  taker_fee_rate: 0.00045
+  funding_multiplier: 0.5
+  base_interest_rate_per_8h: 0.0001
+
+logging:
+  level: INFO
+  json_output: true
+  heartbeat_interval_sec: 300
