@@ -1,0 +1,8 @@
+# config/local.yaml にコピーして使う (gitignore済み)
+# 例: 個別端末でデータ保存先を上書きする
+# storage:
+#   raw_data_root: /mnt/big-disk/diff-old-new/data/raw
+
+# 例: ロギングを DEBUG に
+# logging:
+#   level: DEBUG
