@@ -55,6 +55,12 @@ gui = [
     "altair~=6.1.0",
     "pandas>=2.0",  # altair は pandas DataFrame を要求
 ]
+audit = [
+    # 外部ベンチマーク (SPY 等) の取得
+    "yfinance~=1.3.0",
+    # DuckDB の datetime 計算で必要
+    "pytz>=2025.1",
+]
 
 [project.scripts]
 diff-old-new = "src.cli:app"

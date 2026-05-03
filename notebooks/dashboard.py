@@ -215,6 +215,26 @@ def _trade_table(mo, trades):
 
 
 @app.cell
+def _audit_section(mo, cfg, repo_root):
+    """データ品質スコア (Audit-D 結果) を表示."""
+    audit_md_path = repo_root / "docs" / "audit" / "D_quality_score.md"
+    if audit_md_path.exists():
+        body = audit_md_path.read_text(encoding="utf-8")
+        _audit_view = mo.md(body)
+    else:
+        _audit_view = mo.md(
+            "## Audit\n\n"
+            "_audit レポート未生成. 以下を実行してから再表示してください:_\n\n"
+            "```bash\n"
+            "python scripts/audit_quality.py\n"
+            "```"
+        )
+    _ = cfg
+    _audit_view
+    return
+
+
+@app.cell
 def _kpi_cards(mo, ds):
     kpi_names = ["K1", "K2", "K7", "K8", "K9", "fat_tail", "regime_diff"]
     cards = []
