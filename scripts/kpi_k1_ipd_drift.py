@@ -17,11 +17,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import polars as pl
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+from _common import safe_read_parquet_glob  # noqa: E402
 
 from src.config import load_config  # noqa: E402
 from src.l2_features.regime import Regime  # noqa: E402
@@ -83,16 +84,10 @@ def compute_k1(symbol: str = TARGET_SYMBOL) -> dict[str, Any]:
         ]
     )
     glob = str(cfg.storage.curated_data_root / "features" / "**" / "*.parquet")
-    con = duckdb.connect(":memory:")
-    arrow_tbl = con.execute(
-        f"SELECT * FROM read_parquet('{glob}', union_by_name=true) "
-        f"WHERE symbol = '{symbol}' AND regime IN "
-        f"({','.join(repr(r) for r in CLOSURE_REGIMES)})"
-    ).arrow()
-    df = pl.from_arrow(arrow_tbl)
-    if isinstance(df, pl.Series):
-        df = df.to_frame()
-
+    df = safe_read_parquet_glob(glob)
+    if df.is_empty():
+        return {"symbol": symbol, "n_total": 0, "warning": "no curated features yet"}
+    df = df.filter((pl.col("symbol") == symbol) & (pl.col("regime").is_in(CLOSURE_REGIMES)))
     if df.is_empty():
         return {"symbol": symbol, "n_total": 0, "warning": "no closure data"}
 

@@ -1,9 +1,7 @@
 """Regime tagger: R1 (active) / R2 (closure-weekend) / R3 (closure-daily) / R4 (closure-holiday).
 
 v3 §1.2 / §4.2 の Gemini 指摘 (boundary buffer) を実装.
-
-注: NYSE/CME 祝日カレンダーは外部ライブラリ (pandas_market_calendars 等) を使う案もあるが,
-80% プロトタイプではシンプルな静的祝日リストで開始. Phase 1.5 で精緻化.
+Issue #28 (Phase 1.5) 反映: pandas_market_calendars で NYSE 祝日を動的に取得.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ import polars as pl
 from pendulum import timezone as pdl_tz
 
 from src.config import RegimeConfig
+from src.l2_features.calendar import get_nyse_early_close_dates, get_nyse_holidays
 
 ET = pdl_tz("America/New_York")
 
@@ -25,30 +24,20 @@ class Regime(StrEnum):
     ACTIVE = "R1_active"
     CLOSURE_WEEKEND = "R2_closure_weekend"
     CLOSURE_DAILY = "R3_closure_daily"  # CME メンテ 17-18 ET
-    CLOSURE_HOLIDAY = "R4_closure_holiday"
+    CLOSURE_HOLIDAY = "R4_closure_holiday"  # NYSE full holiday or early close
     LIMIT_MOVE = "R5_limit_move"  # Phase 2 で精緻化
     ROLLOVER = "R6_rollover"  # Phase 2 で精緻化
 
 
-# US 主要 equity holiday (静的, 2026年版). Phase 1.5 で外部 calendar lib に置き換え.
-US_EQUITY_HOLIDAYS_2026: set[date] = {
-    date(2026, 1, 1),  # New Year
-    date(2026, 1, 19),  # MLK Day
-    date(2026, 2, 16),  # Presidents Day
-    date(2026, 4, 3),  # Good Friday
-    date(2026, 5, 25),  # Memorial Day
-    date(2026, 6, 19),  # Juneteenth
-    date(2026, 7, 3),  # July 4 observed
-    date(2026, 9, 7),  # Labor Day
-    date(2026, 11, 26),  # Thanksgiving
-    date(2026, 12, 25),  # Christmas
-}
+def _holidays_lazy() -> set[date]:
+    """pandas_market_calendars 由来の動的祝日 (年4回 cache lookup)."""
+    return get_nyse_holidays()
 
 
 def classify_regime(
     ts_utc: datetime,
     cfg: RegimeConfig,
-    holidays: set[date] = US_EQUITY_HOLIDAYS_2026,
+    holidays: set[date] | None = None,
 ) -> Regime:
     """単一 timestamp を regime に分類.
 
@@ -66,7 +55,15 @@ def classify_regime(
     et_time = ts_et.time()
     et_weekday = ts_et.weekday()  # 0=Mon ... 6=Sun
 
+    if holidays is None:
+        holidays = _holidays_lazy()
+
     if et_date in holidays:
+        return Regime.CLOSURE_HOLIDAY
+
+    # NYSE early close 日 (例: Black Friday 13:00 ET) 以降は holiday 扱い
+    early = get_nyse_early_close_dates().get(et_date)
+    if early is not None and et_time >= early:
         return Regime.CLOSURE_HOLIDAY
 
     # CME daily maintenance (17:00-18:00 ET, 平日のみ)

@@ -1,0 +1,19 @@
+{
+  "target_tradfi": "xyz:SP500",
+  "by_crypto": {
+    "BTC": {
+      "n": 111,
+      "overall_corr": NaN,
+      "rolling_corr_distribution": {
+        "n": 0
+      }
+    },
+    "ETH": {
+      "n": 111,
+      "overall_corr": NaN,
+      "rolling_corr_distribution": {
+        "n": 0
+      }
+    }
+  }
+}
