@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## v0.3.0 — 2026-05-04 (Analytics dashboard — marimo + altair)
+
+戦略 backtest と KPI を 1 画面で対話的に観測する **marimo ベース GUI** を導入.
+
+### Added
+- **`src/gui/` モジュール** (PR-B)
+  - `data_access.py`: DuckDB in-memory connection ラッパー + 安全な glob 読み込み
+  - `perf_metrics.py`: Sharpe (95% CI 付き) / Sortino / Max DD / Hit Rate / Profit Factor / Calmar / Expectancy / Equity curve / Underwater curve
+  - `charts.py`: altair 6.1.0 ベース (equity / underwater / trade pnl histogram / IPD time series / top-of-book)
+- **`notebooks/dashboard.py`** (PR-C)
+  - marimo 0.23.4 reactive notebook
+  - 上段: 戦略選択 + 銘柄選択 + Sharpe 等 8 標準 KPI + Equity/Underwater chart + Trade table + PnL ヒストグラム
+  - 中段: 既存 KPI (K1/K2/K7/K8/K9/fat_tail/regime_diff) のカード型サマリ
+  - 下段: 自由探索セル (IPD time series / top-of-book / DuckDB SQL)
+- **backtest 結果 Parquet 永続化** (PR-A)
+  - `src/l3_strategy/persistence.py`: `data/curated/backtest_results/{strategy}/{date}/{hour}/` に保存
+  - `cli.py backtest --save` (default True) で自動保存
+
+### Tests
+- 61 / 61 pytest pass
+- ruff / format clean
+- `marimo run --headless` で HTTP 200 起動確認
+
+### Usage
+```bash
+pip install -e ".[dev,gui]"   # marimo + altair をインストール
+python -m src.cli backtest h1 --symbol xyz:SP500   # backtest 実行 (Parquet 自動保存)
+marimo edit notebooks/dashboard.py                  # 編集モード
+marimo run notebooks/dashboard.py                   # 発表モード (read-only アプリ)
+```
+
+### 主要 PR (develop merge 済)
+- PR-A: backtest result Parquet 永続化
+- PR-B: src/gui/ implementation
+- PR-C: marimo notebook + docs
+
 ## v0.2.0 — 2026-05-04 (Phase 2 tooling + LiveEngine dry-run)
 
 Phase 2 KPI ツール + 戦略 H2/H3 + LiveEngine dry-run まで完了. 1週間 collect 後に実分布で全 KPI を実行可能な状態.
