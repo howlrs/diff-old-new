@@ -18,3 +18,13 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 rust_decimal = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util", "macros"] }
+rstest = { workspace = true }
