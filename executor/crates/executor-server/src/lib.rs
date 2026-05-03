@@ -45,6 +45,7 @@ pub fn build_app(state: Arc<ServerState>) -> Router {
         .route("/v1/exec/{id}", get(routes::get_exec))
         .route("/v1/exec/{id}/cancel", post(routes::cancel_exec))
         .route("/v1/exec/{id}/ws", get(ws::progress_ws))
+        .route("/v1/emergency_stop", post(routes::emergency_stop))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

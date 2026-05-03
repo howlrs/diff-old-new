@@ -254,6 +254,107 @@ async fn get_exec_invalid_id_400() {
 }
 
 #[tokio::test]
+async fn emergency_stop_aborts_running_and_cancels_open_orders() {
+    let (state, _mock) = build_state_with_seed().await;
+
+    // Pre-seed an open order so the cancel branch fires.
+    {
+        let mut g = state.app_state.open_orders.write().await;
+        let cloid = executor_core::cloid::Cloid::new();
+        g.insert(
+            cloid,
+            executor_core::state::OpenOrder {
+                cloid,
+                oid: None,
+                symbol: Symbol::new("BTC"),
+                side: executor_core::types::Side::Long,
+                px: dec!(50000),
+                sz: dec!(0.1),
+                filled_sz: dec!(0),
+                tif: executor_core::types::Tif::Alo,
+                reduce_only: false,
+                placed_at: chrono::Utc::now(),
+            },
+        );
+    }
+
+    let app = build_app(state.clone());
+
+    // Start a running execution.
+    let req_body = serde_json::json!({
+        "algorithm": "passive",
+        "symbol": "BTC",
+        "intent": "open",
+        "target_size": "0.5",
+        "params": {
+            "max_book_age_ms": 0,
+            "repost_poll_ms": 100,
+            "max_total_ms": 10000
+        }
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/exec")
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Hit emergency stop.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/emergency_stop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        v["aborted_executions"].as_u64().unwrap() >= 1,
+        "expected at least 1 aborted execution"
+    );
+    assert!(
+        v["cancelled_orders"].as_u64().unwrap() >= 1,
+        "expected at least 1 cancelled order"
+    );
+}
+
+#[tokio::test]
+async fn emergency_stop_records_operator_header() {
+    let (state, _) = build_state_with_seed().await;
+    let app = build_app(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/emergency_stop")
+                .header("x-operator-id", "alice@desk")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Should still return 200 even with no running executions.
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["aborted_executions"], 0);
+    assert_eq!(v["cancelled_orders"], 0);
+}
+
+#[tokio::test]
 async fn positions_returns_seeded() {
     let (state, _) = build_state_with_seed().await;
     let app = build_app(state);
