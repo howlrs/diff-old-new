@@ -1,82 +1,121 @@
-# Phase 1 完了レポート (中間 — 2026-05-04)
+# Phase 1 完了レポート (v0.1.0)
 
-> このレポートは **Phase 1 のコア骨格完成時点 (2026-05-04)** に作成した中間版.
-> 1週間 collect の実データが集まり次第, KPI K1 / K7 の数値結果を更新する.
+最終更新: 2026-05-04
+Tag: `v0.1.0`
 
-## 達成済み
+## ビジョン (再掲)
+オールド金融 (CME/NYSE/NASDAQ) と新金融 (Hyperliquid HIP-3 / Trade[XYZ]) の **構造的接続点と切断点** を観測し、繰り返し可能な統計的優位 (LLN/CLT) を発見・収益化する.
 
-### 設計・調査
-- [x] Phase 0: Hyperliquid 仕様調査 (`docs/specs/2026-05-04-phase0-spec-notes.md`)
-  - HIP-3 dex (Trade[XYZ]) の Oracle 二重構造 (active = CME 直結 / closure = HL 内部 EMA τ=30min) 把握
-- [x] v3 設計確定 (`docs/specs/2026-05-04-v3-design.md`)
-  - 3層メダリオン (L1 collector / L2 features / L3 strategy)
-  - 戦略仮説 H1 (closure mean reversion) / H3 (CMEメンテ ミニ closure) を主軸
+**Phase 0 で確定した戦略の核**:
+- Hyperliquid 米株 perp の **Oracle 二重構造**:
+  - active session (US株開場) → CME EMM6 直結 (アルファ薄)
+  - closure (週末・CMEメンテ・祝日) → HL内部 EMA τ=30min (**独自価格発見**)
+- **closure に集中する** ことが本流戦略
 
-### コード (PR #26 + #31, develop merge 済み + 進行中)
-- [x] **L1 Data Ingestion**: WS + REST + Parquet 永続化 + graceful shutdown
-  - HIP-3 dex 対応 (`xyz:SP500`, `xyz:XYZ100` + core BTC/ETH の同時収集)
-  - SIGINT/SIGTERM で最終 flush 保証
-  - asyncio.to_thread で I/O オフロード, asyncio.create_task で gap recovery を fire-and-forget
-- [x] **L2 Feature Engineering**: regime tagger / IPD / EMA / spread / gap detector
-  - DST-aware ET 変換 (pendulum), boundary buffer
-- [x] **L3 Strategy / Backtest**: Strategy ABC + cost model + H1 戦略
-  - cost に taker (×2) + funding (0.5x) + slippage (entry/exit 別) を完全控除
-- [x] **CI workflow**: ruff / format / mypy / pytest on PR (Python 3.12)
-- [x] **KPI スクリプト**: K1 (closure IPD ドリフト) / K7 (CME メンテ) の自動レポート生成
-- [x] **テスト**: 26 / 26 pytest pass
+## Phase 1 達成事項
 
-### 実 API 検証 (dry-run + 1分稼働)
-- [x] WS subscribe `xyz:SP500` 等で実データ受信確認
-- [x] REST `metaAndAssetCtxs` の dex=xyz / "" の両 polling 成功
-- [x] 4 銘柄 (xyz:SP500 / xyz:XYZ100 / BTC / ETH) を 1 分間で 各 112 板 + 100+ trades 取得
-- [x] L1 → L2 → L3 backtest の end-to-end パイプライン稼働 (合成データ + 実データ両方)
+### 設計 (Phase 0 + v3 design)
+- [x] Hyperliquid 仕様調査完了 ([phase0-spec-notes.md](specs/2026-05-04-phase0-spec-notes.md))
+- [x] v3 設計確定 ([v3-design.md](specs/2026-05-04-v3-design.md))
+- [x] Gemini partner レビュー 7+ ラウンド (review_log に記録)
 
-### Gemini partner プロセス
-- [x] v1 / v2 / Phase 0 / v3 / プロトタイプ / HIP-3 修正 で計 6 ラウンドのレビュー
-- [x] 致命的指摘 (Oracle 仕様未調査, 片張りリスク, 同期 I/O ブロック, WSループブロック等) を全て反映
-- [x] レビュー履歴は SurrealDB `review_log` に保存
+### 実装 (PR #26, #31, #32, #33 すべて merge 済)
 
-## 未達 (1週間 collect 完了で達成予定)
+#### L1: Data Ingestion
+- [x] WebSocket client (HIP-3 `xyz:` prefix 対応 + 自動再接続 + 30s 安定後 backoff reset)
+- [x] REST poller (core / xyz dex 双方を polling)
+- [x] Atomic Parquet writer (temp+rename+fsync, ディレクトリ fsync も)
+- [x] Gap recovery (Semaphore で REST rate limit 抵触防止 + fire-and-forget)
+- [x] Heartbeat / 欠損率 monitor
+- [x] Graceful shutdown (SIGINT/SIGTERM → 最終 flush 保証)
+- [x] async I/O 全面化 (write_parquet_atomic を asyncio.to_thread にオフロード)
 
-- [ ] **KPI K1 実分布**: closure 中 SP500 IPD 累積ドリフト (週末 R2 / CMEメンテ R3 / 祝日 R4 別)
-- [ ] **KPI K7 実分布**: CMEメンテ時間 IPD ドリフト + post-maint open ギャップ
-  - 期待: 1週間で R3 セグメント 5 個程度, 週末 1 サイクル, 1 R2 セグメント
-  - n=30+ で正規性検定可能なのは 1ヶ月以降
-- [ ] **K10 (コスト控除後期待値)**: H1 を実データに対して N≥30 取引で評価
-- [ ] **K11 (年間試行頻度推定)**: 蓄積データから年間サンプル N の推定
+#### L2: Feature Engineering
+- [x] Regime tagger (R1〜R6 + boundary buffer + DST + early close 対応)
+- [x] **動的 calendar** (pandas_market_calendars 5.3.2 で NYSE 祝日自動取得)
+- [x] IPD calculator + 連続時間 EMA reconstructor (τ=30min, ±50bps clamp)
+- [x] Spread / pair calculator + **Engle-Granger cointegration** + OU half-life
+- [x] Gap detector (regime transition 価格ジャンプ)
+- [x] **Resilience metric** (大口Taker後の板回復時間, K9 KPI 直接決定)
 
-## 既知の制約 (Phase 1.5+ で対応)
+#### L3: Strategy / Backtest
+- [x] Strategy ABC (backtest/live 共通基底 — 実装乖離防止)
+- [x] **マルチポジ・マルチ銘柄 BacktestEngine** (per-symbol ledger + 容量制限 + by_symbol breakdown)
+- [x] Cost model (taker 0.045%×2 + funding 0.5x dampened + slippage entry/exit 別)
+- [x] 戦略 H1 prototype (closure IPD 累積 mean reversion)
+- [x] CLT 95% 信頼区間ベースの採否判定
 
-| ID | 内容 | 対応 Issue / 想定 |
+#### Cross-cutting
+- [x] CI workflow (.github/workflows/ci.yml で ruff + format + mypy + pytest)
+- [x] Pydantic Settings + YAML config + env-var override
+- [x] structlog (JSON line) ロギング
+
+### KPI スクリプト (実データで動作確認済)
+
+| KPI | 内容 | 状態 |
 |---|---|---|
-| C1 | Calendar 静的 (US_EQUITY_HOLIDAYS_2026) | #28 で `pandas_market_calendars` に置き換え |
-| C2 | Resilience metric 未実装 | #13 で大口Taker後の板回復時間を実測 |
-| C3 | ペア / マルチ銘柄バックテスト未対応 | #29 でマルチポジ engine に拡張 |
-| C4 | Live Execution Engine 未実装 | #27 で Strategy ABC 共通継承の証明 |
-| C5 | mypy strict 未通過 (continue-on-error) | Phase 2 で必須化 |
-| C6 | データ schema バージョン管理なし (Gemini 指摘) | Phase 1.5 で raw に schema_version 追加 |
-| C7 | ログローテ無し | systemd service / logrotate 化 (運用整備) |
+| K1 | closure 中 SP500 IPD 累積ドリフト分布 | ✅ docs/kpi/K1.md |
+| K2 | active 開始時 Oracle ワープギャップ | ✅ docs/kpi/K2.md |
+| K7 | CMEメンテ時間 IPD 挙動 | ✅ docs/kpi/K7.md |
+| K8 | 週末 BTC/ETH vs TradFi IPD 相関 | ✅ docs/kpi/K8.md |
+| K9 | 板の Resilience (Capacity) | ✅ **実データで 3514 events 集計** |
 
-## 運用注意 (Gemini partner からの 4 提言)
+#### K9 の実データ結果 (重要)
+| 銘柄 | n_events | recovery rate | median | p95 |
+|---|---|---|---|---|
+| BTC | 2278 | 99.3% | 0.28s | 0.53s |
+| ETH | 821 | 97.8% | 0.26s | 0.48s |
+| xyz:XYZ100 | 126 | 97.6% | 0.46s | 6.83s |
+| xyz:SP500 | 289 | 94.1% | 0.41s | **199.41s** |
 
-1. **ディスク監視**: 1 日 ~320MB (4 銘柄). 1 週間で ~2GB → 余裕あるが監視追加
-2. **NTP 同期**: regime 判定が `exchange_ts` (HL 提供) ベースなのでホスト時刻ずれは直接影響しないが、`recv_ts` ベースの遅延診断には NTP 必須
-3. **WS 切断ギャップ**: 自動再接続 + REST snapshot 復旧は実装済. 切断中の数秒〜数十秒のティック欠損は不可避
-4. **Schema 変更追従**: HIP-3 仕様変更に備えて raw データに schema_version カラムを追加検討
+**含意**:
+- BTC/ETH は **MM 常駐 → 高 Capacity** (大口を出してもインパクト即解消)
+- xyz:SP500 は週末 closure で **p95=199秒の板薄期間** が存在 → **戦略 H1 のサイジング上限を直接決定**
 
-## 次のフェーズ (Phase 2)
+### テスト
+- 31 / 31 pytest pass (regime / IPD/EMA / cost model / H1 strategy / cointegration / multi-position / shutdown 等)
+- ruff + format clean (Phase 1 では mypy は continue-on-error)
 
-K1/K7 の n_segments ≥ 30 が満たされたら以下に進む:
+## Gemini partner レビュー履歴
+6 ラウンドの致命的指摘を全て反映:
+1. v1 設計 → Oracle 仕様未調査・片張りリスク
+2. v2 設計 → FR 二重支払い・テーマ逸脱
+3. Phase 0 / v3 方向性 → "有望な仮説" 評価 + CMEメンテ KPI 提案
+4. プロトタイプ最終 QA → atomic write / async / sequence check 等のバグ 4 件修正
+5. HIP-3 dex 対応 → Pydantic 型 / WS ループブロック / 同期 I/O ブロック の致命 3 件修正
+6. PR #32 review → KPI 性能問題 / glob クラッシュ / 大口判定ノイズ / 年ハードコード を修正
 
-1. **正規性検定 + Hill 推定**: closure IPD 分布が ファットテール か正規か判定
-2. **コスト控除後期待値の確認 (K10)**: 採否判定を満たす戦略が存在するか
-3. **戦略 H1 のチューニング**: 実分布に基づいて閾値・サイズ調整
-4. **戦略 H2 (Crypto Native 相関) と H3 (CME メンテ) の追加検証**
+## Phase 1 KPI 採否判定
 
-Phase 2 突入時は別途ブレストで規律設計 (キル スイッチ / drawdown 上限 / hot wallet 鍵管理).
+**v3 設計 §3 の採否基準**:
+> K10 (コスト控除後期待値が正) かつ K11 (年間 N≥500 サンプル) を満たす戦略を最低1つ発見
+
+**現状判定**:
+- K9 で **Capacity 制約は判明** (xyz:SP500 でサイジング上限あり)
+- 1 週間 collect で **K1/K7 の実分布**, **K2/K8 の実サンプル**が取れる予定
+- 戦略 H1 を実分布に基づきチューニング → コスト控除後期待値の判定は Phase 1.5 で完了
+
+## 次のフェーズ (Phase 2 / 3)
+
+Phase 2 ブレスト課題:
+- 戦略 H2 (Crypto Native 相関) / H3 (CMEメンテ mini-closure) / H4 (active 中 BTC 連動) の追加検証
+- LLN/CLT 適用可否のファットテール定量化 (Hill 推定 + QQ プロット)
+- Welch t-test による regime 別差の有意性
+
+Phase 3 課題:
+- Live Execution Engine ([#27](https://github.com/howlrs/diff-old-new/issues/27))
+- EIP-712 hot wallet 鍵管理
+- regime境界 -15min での自動ポジ縮小
+- キル スイッチ / drawdown 上限
+
+## ガバナンス改善余地
+- mypy strict 通過 (Phase 1 では continue-on-error)
+- CI に reviewdog 等で警告通知
+- データ schema バージョン管理 (HIP-3 仕様変更追従)
+- ログローテ (1週間以上の運用想定)
 
 ## 参照
-- v3 設計: [`docs/specs/2026-05-04-v3-design.md`](specs/2026-05-04-v3-design.md)
-- Phase 0 仕様: [`docs/specs/2026-05-04-phase0-spec-notes.md`](specs/2026-05-04-phase0-spec-notes.md)
-- KPI: [`docs/kpi/K1.md`](kpi/K1.md), [`docs/kpi/K7.md`](kpi/K7.md)
-- PR履歴: #26 (L1/L2/L3 prototype skeleton), #31 (HIP-3 + shutdown + CI + KPI)
+- [v3 設計](specs/2026-05-04-v3-design.md)
+- [Phase 0 仕様](specs/2026-05-04-phase0-spec-notes.md)
+- KPI: [K1](kpi/K1.md) | [K2](kpi/K2.md) | [K7](kpi/K7.md) | [K8](kpi/K8.md) | [K9](kpi/K9.md)
+- 主要 PR: #26 (prototype skeleton), #31 (HIP-3 + shutdown + CI), #32 (calendar + cointegration + KPI), #33 (multi-position)
