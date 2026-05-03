@@ -55,7 +55,7 @@ def backtest(
     exit_min: int = typer.Option(60, help="exit_after_minutes"),
 ) -> None:
     """L3: 指定戦略を curated features に対して backtest."""
-    from src.l2_features.loader import load_table
+    from src.l2_features.loader import load_features
     from src.l3_strategy.backtest import BacktestEngine
     from src.l3_strategy.strategies.h1_closure_mean_rev import (
         H1ClosureMeanReversion,
@@ -64,9 +64,7 @@ def backtest(
     cfg = _load()
     parsed = date_t.fromisoformat(day) if day else None
 
-    # curated 側の features を読む
-    cfg_curated = cfg.storage.model_copy(update={"raw_data_root": cfg.storage.curated_data_root})
-    df = load_table("features", cfg_curated, parsed)
+    df = load_features(cfg.storage, parsed)
 
     if strategy == "h1":
         strat = H1ClosureMeanReversion()

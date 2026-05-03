@@ -27,10 +27,17 @@ def load_table(
     table: str,
     cfg: StorageConfig,
     day: date_t | None = None,
+    *,
+    is_curated: bool = False,
 ) -> pl.DataFrame:
-    """Parquet partition を読み込んで Polars DataFrame で返す."""
-    glob = _partition_glob(cfg.raw_data_root, table, day)
-    log.debug("loader.read", table=table, glob=glob)
+    """Parquet partition を読み込んで Polars DataFrame で返す.
+
+    Gemini指摘 (Improvement) 反映: is_curated で raw/curated を切り替える.
+    呼び出し側で StorageConfig を model_copy するハックを廃止.
+    """
+    root = cfg.curated_data_root if is_curated else cfg.raw_data_root
+    glob = _partition_glob(root, table, day)
+    log.debug("loader.read", table=table, glob=glob, is_curated=is_curated)
     con = duckdb.connect(":memory:")
     arrow_tbl = con.execute(f"SELECT * FROM read_parquet('{glob}', union_by_name=true)").arrow()
     df = pl.from_arrow(arrow_tbl)
@@ -49,3 +56,8 @@ def load_trades(cfg: StorageConfig, day: date_t | None = None) -> pl.DataFrame:
 
 def load_asset_ctxs(cfg: StorageConfig, day: date_t | None = None) -> pl.DataFrame:
     return load_table("asset_ctxs", cfg, day)
+
+
+def load_features(cfg: StorageConfig, day: date_t | None = None) -> pl.DataFrame:
+    """L2 出力 (curated) を読む."""
+    return load_table("features", cfg, day, is_curated=True)

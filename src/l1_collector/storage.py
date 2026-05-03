@@ -80,13 +80,25 @@ def write_parquet_atomic(
     )
 
     # fsync で disk へ flush してから rename
-    fd = os.open(fpath_tmp, os.O_RDONLY)
+    # Gemini指摘 (Improvement): O_RDONLY の fsync は環境依存なので O_RDWR で開く.
+    fd = os.open(fpath_tmp, os.O_RDWR)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
 
     os.rename(fpath_tmp, fpath_final)
+
+    # ディレクトリの fsync で rename を persist (best effort).
+    try:
+        dir_fd = os.open(part_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
     log.info(
         "parquet.written",
         table=table,

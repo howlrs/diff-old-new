@@ -133,21 +133,23 @@ class L1Runner:
             await self._flush_all()
 
     async def _flush_all(self) -> None:
+        """Gemini指摘 (Bug 4) 反映: deque を新オブジェクトに swap してから flush.
+
+        list(buf); buf.clear() の方式では理屈上書き手とのレースが残る.
+        新 deque に挿げ替えてから旧 deque を処理することで完全に分離する.
+        """
         # L2
-        rows = list(self._l2_buf)
-        self._l2_buf.clear()
-        if rows:
-            write_parquet_atomic(rows, "l2book", self.cfg.storage)
+        old_l2, self._l2_buf = self._l2_buf, deque()
+        if old_l2:
+            write_parquet_atomic(list(old_l2), "l2book", self.cfg.storage)
         # trades
-        rows = list(self._trade_buf)
-        self._trade_buf.clear()
-        if rows:
-            write_parquet_atomic(rows, "trades", self.cfg.storage)
+        old_trades, self._trade_buf = self._trade_buf, deque()
+        if old_trades:
+            write_parquet_atomic(list(old_trades), "trades", self.cfg.storage)
         # ctxs
-        rows = list(self._ctx_buf)
-        self._ctx_buf.clear()
-        if rows:
-            write_parquet_atomic(rows, "asset_ctxs", self.cfg.storage)
+        old_ctxs, self._ctx_buf = self._ctx_buf, deque()
+        if old_ctxs:
+            write_parquet_atomic(list(old_ctxs), "asset_ctxs", self.cfg.storage)
 
     async def _run_heartbeat(self) -> None:
         interval = self.cfg.logging.heartbeat_interval_sec

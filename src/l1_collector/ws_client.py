@@ -58,13 +58,27 @@ class HLWebSocketClient:
     async def stream(
         self,
     ) -> AsyncIterator[L2BookSnapshot | TradeEvent | GapEvent]:
-        """無限ストリーム. 切断は自動再接続で吸収."""
+        """無限ストリーム. 切断は自動再接続で吸収.
+
+        Gemini指摘 (Bug 1) 反映: 1件受信で attempt=0 にすると不安定環境で
+        backoff が全く効かない. 安定稼働 (≥ stable_uptime_sec) してから reset.
+        """
         attempt = 0
+        stable_uptime_sec = 30.0
         while attempt < self.cfg.ws_reconnect_max_attempts:
+            connected_at: float | None = None
             try:
+                loop = asyncio.get_running_loop()
+                connected_at = loop.time()
                 async for event in self._connect_and_stream():
                     yield event
-                attempt = 0
+                    if (
+                        attempt > 0
+                        and connected_at is not None
+                        and (loop.time() - connected_at) >= stable_uptime_sec
+                    ):
+                        attempt = 0
+                        connected_at = None  # 一度だけ reset
             except ConnectionClosed as exc:
                 attempt += 1
                 wait = min(

@@ -13,12 +13,20 @@ from src.config import CostConfig
 
 @dataclass
 class TradeCostInput:
+    """エントリー / エグジット 両時点の slippage を別々に計算するための入力.
+
+    Gemini指摘 (Bug 3) 反映: ipd/mid は exit 時点だが,
+    entry 時点の状態を別途渡せるようにする.
+    """
+
     size_usd: float
     holding_hours: float
     funding_rate: float | None
-    ipd: float | None
-    mid: float
+    ipd: float | None  # exit 時点 ipd (互換性のため残す)
+    mid: float  # exit 時点 mid
     resilience_factor: float = 1.0  # 1.0 = 板すぐ戻る, 大きいほど slippage 増
+    entry_ipd: float | None = None  # 指定なければ ipd と同値とみなす
+    entry_mid: float | None = None  # 指定なければ mid と同値とみなす
 
 
 def estimate_taker_fee(size_usd: float, fee_rate: float) -> float:
@@ -62,7 +70,10 @@ def total_cost(
     inp: TradeCostInput,
     cfg: CostConfig,
 ) -> float:
-    """エントリー + エグジット 両方分のコスト合計."""
+    """エントリー + エグジット 両方分のコスト合計.
+
+    Gemini指摘 (Bug 3) 反映: entry / exit の slippage を別々に計算して合算.
+    """
     fee = estimate_taker_fee(inp.size_usd, cfg.taker_fee_rate) * 2  # entry + exit
     funding = estimate_funding_cost(
         inp.size_usd,
@@ -70,5 +81,8 @@ def total_cost(
         inp.holding_hours,
         cfg.funding_multiplier,
     )
-    slip = estimate_slippage(inp.size_usd, inp.mid, inp.ipd, inp.resilience_factor) * 2
-    return fee + funding + slip
+    entry_ipd = inp.entry_ipd if inp.entry_ipd is not None else inp.ipd
+    entry_mid = inp.entry_mid if inp.entry_mid is not None else inp.mid
+    slip_entry = estimate_slippage(inp.size_usd, entry_mid, entry_ipd, inp.resilience_factor)
+    slip_exit = estimate_slippage(inp.size_usd, inp.mid, inp.ipd, inp.resilience_factor)
+    return fee + funding + slip_entry + slip_exit

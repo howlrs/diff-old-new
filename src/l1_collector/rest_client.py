@@ -51,10 +51,16 @@ class HLRestClient:
         raise RuntimeError(f"REST request failed after retries: {payload}")
 
     async def fetch_meta_and_asset_ctxs(self) -> list[AssetCtx]:
-        """metaAndAssetCtxs を取得して symbols 別の AssetCtx へ展開."""
+        """metaAndAssetCtxs を取得して symbols 別の AssetCtx へ展開.
+
+        Gemini指摘 (Bug 2) 反映: 空配列 / 形式違いを防御的にチェック.
+        """
         data = await self._post({"type": "metaAndAssetCtxs"})
-        meta = data[0]
-        ctxs = data[1]
+        if not isinstance(data, list) or len(data) < 2:
+            log.warning("rest.unexpected_response", payload_type="metaAndAssetCtxs")
+            return []
+        meta = data[0] if isinstance(data[0], dict) else {}
+        ctxs = data[1] if isinstance(data[1], list) else []
         universe = meta.get("universe", [])
         poll_ts = datetime.now(UTC)
         out: list[AssetCtx] = []

@@ -26,10 +26,18 @@ log = get_logger("l3.backtest")
 
 @dataclass
 class _OpenPosition:
+    """エントリー時のマーケットスナップショット (Bug 3 修正用).
+
+    Gemini指摘: slippage を entry/exit で別々に計算する必要があるため,
+    entry 時の ipd / mid を保存しておく.
+    """
+
     entry_ts: datetime
     side: Side
     size_usd: float
     entry_px: float
+    entry_ipd: float | None
+    entry_mid: float
     target_pnl_bps: float
     metadata: dict = field(default_factory=dict)
 
@@ -105,6 +113,8 @@ class BacktestEngine:
                 side=sig.side,
                 size_usd=sig.size_usd,
                 entry_px=state.mid,
+                entry_ipd=state.ipd,
+                entry_mid=state.mid,
                 target_pnl_bps=sig.expected_pnl_bps,
                 metadata=sig.metadata,
             )
@@ -132,6 +142,8 @@ class BacktestEngine:
                 funding_rate=state.funding_rate,
                 ipd=state.ipd,
                 mid=state.mid,
+                entry_ipd=pos.entry_ipd,
+                entry_mid=pos.entry_mid,
                 resilience_factor=1.0,  # Phase 2: 実測 resilience を入れる
             ),
             self.cost_cfg,
