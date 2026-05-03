@@ -52,3 +52,8 @@ logs/
 .ipynb_checkpoints/
 *.ipynb
 notebooks/scratch/
+
+# Rust
+executor/target/
+executor/**/target/
+**/Cargo.lock.bak

@@ -1,0 +1,28 @@
+[package]
+name = "executor-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "axum REST + WS server — PR-7"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "executor-server"
+path = "src/main.rs"
+
+[dependencies]
+executor-core = { workspace = true }
+executor-hl = { workspace = true }
+executor-algo = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
