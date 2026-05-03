@@ -24,9 +24,12 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        # "all" は機能 extras (gui/audit/...) をまとめた meta extra.
+        # extras 追加時は pyproject.toml の "all" にも必ず反映すること.
+        # Gemini partner レビュー (2026-05-04) で推奨されたデファクト構成.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,gui,audit]"
+          pip install -e ".[dev,all]"
 
       - name: Ruff lint
         run: ruff check src tests
