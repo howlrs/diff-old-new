@@ -1,0 +1,100 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/executor-core",
+    "crates/executor-hl",
+    "crates/executor-algo",
+    "crates/executor-server",
+    "crates/executor-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["howlrs <sharebook.amazon@gmail.com>"]
+repository = "https://github.com/howlrs/diff-old-new"
+description = "Hyperliquid order execution layer (Rust) for diff-old-new project"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.52", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP / WS
+reqwest = { version = "0.13", features = ["json", "rustls-tls"], default-features = false }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Web server (PR-7)
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Numerics (Gemini v2: rust_decimal で f64 sign 問題回避)
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+
+# IDs / time
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Config
+figment = { version = "0.10", features = ["yaml", "env"] }
+
+# Security (Gemini v2: secrecy + zeroize for key mgmt)
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# Testing
+mockall = "0.13"
+proptest = "1"
+rstest = "0.24"
+
+# Internal crates (path)
+executor-core = { path = "crates/executor-core" }
+executor-hl = { path = "crates/executor-hl" }
+executor-algo = { path = "crates/executor-algo" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+
+# Workspace 全体で unsafe 禁止 (各クレートに #![forbid(unsafe_code)] 推奨)
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# パフォーマンス
+inefficient_to_string = "warn"
+redundant_clone = "warn"
+# 安全性 (本番コードでは avoid; tests は許可)
+unwrap_used = "warn"
+expect_used = "warn"
+# panic は restriction lint で test allow しにくい. 本番コードで panic! 直接書くなら allow expr で個別許可.
+# 設計
+todo = "warn"
+unimplemented = "warn"
+
+# テストモジュールでは unwrap/expect を許可する.
+# (各 #[cfg(test)] ブロックで allow を書くより workspace 統一が楽)
+[workspace.metadata.clippy]
+test_lints_enabled = false

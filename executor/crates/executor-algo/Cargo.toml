@@ -1,0 +1,20 @@
+[package]
+name = "executor-algo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Order execution algorithms (TWAP, MM, etc) — PR-3〜PR-6"
+
+[lints]
+workspace = true
+
+[dependencies]
+executor-core = { workspace = true }
+executor-hl = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+rust_decimal = { workspace = true }

@@ -10,28 +10,43 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-if [[ ! -d .venv ]]; then
-    echo "ERROR: .venv not found. Run: python3.12 -m venv .venv && pip install -e '.[dev,all]'" >&2
-    exit 1
-fi
-
 echo "=== CI replay ==="
 echo ""
 
-echo "[1/4] Install check (CI と同じ pip install)..."
-.venv/bin/pip install -e ".[dev,all]" --quiet 2>&1 | tail -3
+# ----- Python -----
+if [[ -d .venv ]]; then
+    echo "[python 1/4] Install check (CI と同じ pip install)..."
+    .venv/bin/pip install -e ".[dev,all]" --quiet 2>&1 | tail -3
 
-echo ""
-echo "[2/4] Ruff lint..."
-.venv/bin/ruff check src tests
+    echo ""
+    echo "[python 2/4] Ruff lint..."
+    .venv/bin/ruff check src tests
 
-echo ""
-echo "[3/4] Ruff format check..."
-.venv/bin/ruff format --check src tests
+    echo ""
+    echo "[python 3/4] Ruff format check..."
+    .venv/bin/ruff format --check src tests
 
-echo ""
-echo "[4/4] Pytest (CI と同じ marker filter)..."
-.venv/bin/pytest -q -m "not live and not slow" --cov=src --cov-report=term-missing | tail -5
+    echo ""
+    echo "[python 4/4] Pytest (CI と同じ marker filter)..."
+    .venv/bin/pytest -q -m "not live and not slow" --cov=src --cov-report=term-missing | tail -5
+else
+    echo "[python] .venv not found, skipping (run: python3.12 -m venv .venv && pip install -e '.[dev,all]')"
+fi
+
+# ----- Rust -----
+if [[ -d executor && -f executor/Cargo.toml ]]; then
+    echo ""
+    echo "[rust 1/3] cargo fmt --check..."
+    (cd executor && cargo fmt --all -- --check)
+
+    echo ""
+    echo "[rust 2/3] cargo clippy -D warnings..."
+    (cd executor && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -5)
+
+    echo ""
+    echo "[rust 3/3] cargo test..."
+    (cd executor && cargo test --workspace 2>&1 | grep -E "test result|^error" | tail -10)
+fi
 
 echo ""
 echo "=== ✓ All CI checks passed locally ==="

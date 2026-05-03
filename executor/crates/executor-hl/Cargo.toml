@@ -1,0 +1,22 @@
+[package]
+name = "executor-hl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Hyperliquid HTTP/WS client + signer abstraction (PR-2)"
+
+[lints]
+workspace = true
+
+[dependencies]
+executor-core = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
