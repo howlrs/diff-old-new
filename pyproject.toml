@@ -36,7 +36,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest~=9.0.3",
+    # pytest 9.x 対応の pytest-asyncio がまだリリースされていないため pytest 8.x で統一.
+    # 新版が出たらアップデート (ref: pytest-asyncio 1.1.1 は pytest<9 制約).
+    "pytest~=8.4.0",
     "pytest-asyncio~=1.1.0",
     "pytest-cov~=7.1.0",
     "hypothesis~=6.152.4",
