@@ -163,6 +163,98 @@ pub async fn collect_own_fills(
     (collected, true)
 }
 
+/// Drain *new* fills (since `last_seen_idx`) belonging to the given cloid set.
+/// Returns the new fills, their cumulative size, and the updated last index
+/// for the caller to pass on the next call.
+///
+/// This is the building block used by long-running algos (PASSIVE_FOLLOW,
+/// TWAP, MARKET_MAKE) where we resume scanning across many iterations rather
+/// than waiting for one combined "deadline".
+///
+/// **Invariant:** This relies on `AppState::recent_fills` being **append-only**
+/// during an algorithm's lifetime — fills are pushed via `push_back` by the
+/// WS reader and never removed mid-scan. If the deque ever begins to be
+/// truncated from the front (e.g., for memory bounds), this index logic must
+/// be revisited or fills must be tagged with monotonic ids the caller tracks.
+pub async fn drain_new_fills(
+    state: &AppState,
+    own_cloids: &HashSet<Cloid>,
+    last_seen_idx: usize,
+) -> (Vec<Fill>, Decimal, usize) {
+    let mut new_fills = Vec::new();
+    let mut sum = Decimal::ZERO;
+    let mut idx = last_seen_idx;
+    let fills = state.recent_fills.read().await;
+    for (i, f) in fills.iter().enumerate().skip(last_seen_idx) {
+        if let Some(c) = f.cloid {
+            if own_cloids.contains(&c) {
+                new_fills.push(f.clone());
+                sum += f.sz;
+            }
+        }
+        idx = i + 1;
+    }
+    (new_fills, sum, idx)
+}
+
+/// Reject the book if its WS timestamp is missing or older than `max_age`.
+/// Algorithms call this every time they take a book snapshot — a disconnected
+/// WS would otherwise leave a stale book in `AppState`, and we'd happily trade
+/// against frozen prices.
+///
+/// `max_age = None` skips the check entirely (useful in unit tests where
+/// `tokio::time::pause()` freezes virtual time but `Utc::now()` keeps walking).
+pub fn ensure_book_fresh(
+    book: &executor_core::state::OrderBook,
+    max_age: Option<Duration>,
+) -> Result<(), AlgoError> {
+    let Some(max_age) = max_age else {
+        return Ok(());
+    };
+    let ts = book
+        .ts
+        .ok_or_else(|| AlgoError::InvalidParams("book has no ts".into()))?;
+    let age = Utc::now() - ts;
+    let age_ms = age.num_milliseconds();
+    if age_ms < 0 {
+        // ts in the future — clock skew or tests with paused-time. Treat as
+        // fresh; the caller can disable the check via max_age = None.
+        return Ok(());
+    }
+    if (age_ms as u128) > max_age.as_millis() {
+        return Err(AlgoError::InvalidParams(format!(
+            "book stale ({age_ms}ms > {}ms)",
+            max_age.as_millis()
+        )));
+    }
+    Ok(())
+}
+
+/// Compute a marketable taker limit price including a slippage cap.
+/// Long → best_ask × (1 + slippage_bps / 10000)
+/// Short → best_bid × (1 - slippage_bps / 10000)
+pub fn taker_limit_price(
+    book: &executor_core::state::OrderBook,
+    side: executor_core::types::Side,
+    slippage_bps: Decimal,
+) -> Result<Decimal, AlgoError> {
+    let bps = slippage_bps / Decimal::from(10_000);
+    match side {
+        executor_core::types::Side::Long => {
+            let ask = book
+                .best_ask()
+                .ok_or_else(|| AlgoError::InvalidParams("taker: empty asks".into()))?;
+            Ok(ask + ask * bps)
+        }
+        executor_core::types::Side::Short => {
+            let bid = book
+                .best_bid()
+                .ok_or_else(|| AlgoError::InvalidParams("taker: empty bids".into()))?;
+            Ok(bid - bid * bps)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -214,6 +306,103 @@ mod tests {
         assert!(ok);
         assert_eq!(got.len(), 2);
         assert_eq!(got.iter().map(|f| f.sz).sum::<Decimal>(), dec!(1.0));
+    }
+
+    #[tokio::test]
+    async fn drain_new_fills_returns_only_owned_cloids() {
+        let state = Arc::new(AppState::new());
+        let mine = Cloid::new();
+        let theirs = Cloid::new();
+        let mut own = HashSet::new();
+        own.insert(mine);
+        {
+            let mut fills = state.recent_fills.write().await;
+            fills.push_back(Fill {
+                symbol: Symbol::new("BTC"),
+                cloid: Some(mine),
+                oid: OrderId(1),
+                side: Side::Long,
+                px: dec!(100),
+                sz: dec!(0.3),
+                fee: dec!(0),
+                ts: Utc::now(),
+            });
+            fills.push_back(Fill {
+                symbol: Symbol::new("BTC"),
+                cloid: Some(theirs),
+                oid: OrderId(2),
+                side: Side::Long,
+                px: dec!(100),
+                sz: dec!(0.4),
+                fee: dec!(0),
+                ts: Utc::now(),
+            });
+            fills.push_back(Fill {
+                symbol: Symbol::new("BTC"),
+                cloid: Some(mine),
+                oid: OrderId(3),
+                side: Side::Long,
+                px: dec!(101),
+                sz: dec!(0.2),
+                fee: dec!(0),
+                ts: Utc::now(),
+            });
+        }
+        let (got, sum, idx) = drain_new_fills(&state, &own, 0).await;
+        assert_eq!(got.len(), 2);
+        assert_eq!(sum, dec!(0.5));
+        assert_eq!(idx, 3, "scan must advance past every entry");
+
+        // Calling again with the resumed idx returns nothing.
+        let (got2, sum2, idx2) = drain_new_fills(&state, &own, idx).await;
+        assert!(got2.is_empty());
+        assert_eq!(sum2, Decimal::ZERO);
+        assert_eq!(idx2, 3);
+    }
+
+    #[test]
+    fn taker_limit_price_long_adds_slippage() {
+        let book = executor_core::state::OrderBook {
+            bids: vec![executor_core::state::BookLevel {
+                px: dec!(99),
+                sz: dec!(1),
+                n: 1,
+            }],
+            asks: vec![executor_core::state::BookLevel {
+                px: dec!(100),
+                sz: dec!(1),
+                n: 1,
+            }],
+            ts: None,
+        };
+        let px = taker_limit_price(&book, Side::Long, dec!(50)).unwrap();
+        assert_eq!(px, dec!(100.5));
+    }
+
+    #[test]
+    fn taker_limit_price_short_subtracts_slippage() {
+        let book = executor_core::state::OrderBook {
+            bids: vec![executor_core::state::BookLevel {
+                px: dec!(100),
+                sz: dec!(1),
+                n: 1,
+            }],
+            asks: vec![executor_core::state::BookLevel {
+                px: dec!(101),
+                sz: dec!(1),
+                n: 1,
+            }],
+            ts: None,
+        };
+        let px = taker_limit_price(&book, Side::Short, dec!(50)).unwrap();
+        assert_eq!(px, dec!(99.5));
+    }
+
+    #[test]
+    fn taker_limit_price_empty_book_errors() {
+        let book = executor_core::state::OrderBook::default();
+        assert!(taker_limit_price(&book, Side::Long, dec!(20)).is_err());
+        assert!(taker_limit_price(&book, Side::Short, dec!(20)).is_err());
     }
 
     #[tokio::test(start_paused = true)]

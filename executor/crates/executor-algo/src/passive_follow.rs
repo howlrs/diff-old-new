@@ -42,7 +42,7 @@ use executor_core::types::{Side, Tif};
 
 use executor_hl::batch_sender::OrderOrCancel;
 
-use crate::algorithm::{build_report, Algorithm, ExecutionContext};
+use crate::algorithm::{build_report, drain_new_fills, Algorithm, ExecutionContext};
 use crate::market::{ensure_book_fresh, resolve_side_and_size};
 
 const DEFAULT_MAX_TOTAL_MS: u32 = 60_000;
@@ -111,31 +111,6 @@ fn touch_for_side(book: &OrderBook, side: Side) -> Result<Decimal, AlgoError> {
             .best_ask()
             .ok_or_else(|| AlgoError::InvalidParams("passive: empty asks".into())),
     }
-}
-
-/// Sum *new* fills (not already counted) for the given cloid set; returns the
-/// (vec of new fills, cumulative size of new fills, last index scanned). The
-/// caller advances `last_seen_idx` so the next call resumes after the prior
-/// scan.
-async fn drain_new_fills(
-    state: &AppState,
-    own_cloids: &HashSet<Cloid>,
-    last_seen_idx: usize,
-) -> (Vec<executor_core::types::Fill>, Decimal, usize) {
-    let mut new_fills = Vec::new();
-    let mut sum = Decimal::ZERO;
-    let mut idx = last_seen_idx;
-    let fills = state.recent_fills.read().await;
-    for (i, f) in fills.iter().enumerate().skip(last_seen_idx) {
-        if let Some(c) = f.cloid {
-            if own_cloids.contains(&c) {
-                new_fills.push(f.clone());
-                sum += f.sz;
-            }
-        }
-        idx = i + 1;
-    }
-    (new_fills, sum, idx)
 }
 
 #[derive(Debug, Default)]

@@ -10,13 +10,16 @@
 //! - PR-3: [`Algorithm`] trait + [`ExecutionContext`] + [`MarketAlgorithm`]
 //! - PR-4: [`PassiveFollowAlgorithm`] (post-only ALO at touch, individual
 //!   cancel/repost on book movement)
+//! - PR-5: [`TwapAlgorithm`] (time-weighted slicing over MARKET / PASSIVE)
 
 #![forbid(unsafe_code)]
 
 pub mod algorithm;
 pub mod market;
 pub mod passive_follow;
+pub mod twap;
 
 pub use algorithm::{build_report, collect_own_fills, Algorithm, ExecutionContext, ProgressTx};
 pub use market::{MarketAlgorithm, MarketParams};
 pub use passive_follow::{PassiveFollowAlgorithm, PassiveFollowParams};
+pub use twap::{TwapAlgorithm, TwapChild, TwapParams};
