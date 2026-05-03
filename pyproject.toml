@@ -48,10 +48,12 @@ dev = [
     "ruff~=0.15.12",
     "mypy~=1.20.2",
 ]
-notebook = [
-    "jupyter>=1.1.0",
-    "matplotlib>=3.9.0",
-    "seaborn>=0.13.0",
+gui = [
+    # marimo: reactive Python notebook (Jupyter 代替, git-friendly, app/edit 兼用)
+    "marimo[recommended]~=0.23.4",
+    # altair: declarative visualization
+    "altair~=6.1.0",
+    "pandas>=2.0",  # altair は pandas DataFrame を要求
 ]
 
 [project.scripts]
