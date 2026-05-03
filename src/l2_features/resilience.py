@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import polars as pl
 
 DEFAULT_LARGE_TRADE_K = 10.0  # 中央値の 10 倍超で「大口」
+DEFAULT_LARGE_TRADE_MIN_USD = 500.0  # 絶対額の下限 (Gemini指摘: ダスト連発で誤検知防止)
 DEFAULT_SPREAD_TOLERANCE = 1.5  # 大口前 spread の 1.5 倍以内に戻ったら「回復」
 DEFAULT_RECOVERY_TIMEOUT_SEC = 300.0
 
@@ -38,6 +39,7 @@ def detect_large_taker_events(
     *,
     window: int = 50,
     k: float = DEFAULT_LARGE_TRADE_K,
+    min_usd: float = DEFAULT_LARGE_TRADE_MIN_USD,
 ) -> pl.DataFrame:
     """trades から大口イベント行を抽出.
 
@@ -62,7 +64,7 @@ def detect_large_taker_events(
         .alias("median_size_usd")
     )
     df = df.with_columns((pl.col("size_usd") / pl.col("median_size_usd")).alias("size_multiple"))
-    return df.filter(pl.col("size_multiple") >= k)
+    return df.filter((pl.col("size_multiple") >= k) & (pl.col("size_usd") >= min_usd))
 
 
 def compute_resilience_for_event(
@@ -121,28 +123,44 @@ def compute_resilience_distribution(
     *,
     window: int = 50,
     k: float = DEFAULT_LARGE_TRADE_K,
+    min_usd: float = DEFAULT_LARGE_TRADE_MIN_USD,
     pre_window_sec: int = 30,
     spread_tolerance: float = DEFAULT_SPREAD_TOLERANCE,
     timeout_sec: float = DEFAULT_RECOVERY_TIMEOUT_SEC,
 ) -> list[ResilienceEvent]:
-    """全大口イベントの ResilienceEvent リスト."""
-    events = detect_large_taker_events(trades, window=window, k=k)
+    """全大口イベントの ResilienceEvent リスト.
+
+    Gemini指摘 (PR #32 review) のパフォーマンス問題対策:
+    l2book を symbol 別に 1度ソート + spread 列を事前計算してキャッシュし,
+    イベントごとの filter コストを下げる.
+    """
+    events = detect_large_taker_events(trades, window=window, k=k, min_usd=min_usd)
     if events.is_empty():
         return []
 
+    # symbol 別 l2book キャッシュ (sorted + spread 列計算済み)
+    l2_cache: dict[str, pl.DataFrame] = {}
+    for sym in l2book["symbol"].unique().to_list() if not l2book.is_empty() else []:
+        sub = l2book.filter(pl.col("symbol") == sym).sort("exchange_ts")
+        sub = sub.with_columns((pl.col("best_ask") - pl.col("best_bid")).alias("spread"))
+        l2_cache[sym] = sub
+
     out: list[ResilienceEvent] = []
     for row in events.iter_rows(named=True):
-        pre_spread, post_max, rec_sec = compute_resilience_for_event(
-            l2book,
+        sym = row["symbol"]
+        cache = l2_cache.get(sym)
+        if cache is None or cache.is_empty():
+            continue
+        pre_spread, post_max, rec_sec = _compute_resilience_with_cache(
+            cache,
             row["exchange_ts"],
-            row["symbol"],
             pre_window_sec=pre_window_sec,
             spread_tolerance=spread_tolerance,
             timeout_sec=timeout_sec,
         )
         out.append(
             ResilienceEvent(
-                symbol=row["symbol"],
+                symbol=sym,
                 trade_ts=row["exchange_ts"],
                 trade_size_usd=float(row.get("size_usd") or 0.0),
                 trade_side=row.get("side", ""),
@@ -153,3 +171,35 @@ def compute_resilience_distribution(
             )
         )
     return out
+
+
+def _compute_resilience_with_cache(
+    cache: pl.DataFrame,
+    event_ts,
+    *,
+    pre_window_sec: int,
+    spread_tolerance: float,
+    timeout_sec: float,
+) -> tuple[float, float, float | None]:
+    """事前ソート + spread 列付きキャッシュを使う高速版."""
+    pre = cache.filter(
+        (pl.col("exchange_ts") < event_ts)
+        & (pl.col("exchange_ts") >= event_ts - pl.duration(seconds=pre_window_sec))
+    )
+    post = cache.filter(
+        (pl.col("exchange_ts") >= event_ts)
+        & (pl.col("exchange_ts") < event_ts + pl.duration(seconds=int(timeout_sec)))
+    )
+    if pre.is_empty() or post.is_empty():
+        return (0.0, 0.0, None)
+    pre_spread = pre["spread"].drop_nulls().median()
+    if pre_spread is None or pre_spread <= 0:
+        return (0.0, 0.0, None)
+    post_spread_max = post["spread"].drop_nulls().max() or 0.0
+    threshold = pre_spread * spread_tolerance
+    recovered = post.filter(pl.col("spread") <= threshold)
+    if recovered.is_empty():
+        return (float(pre_spread), float(post_spread_max), None)
+    first_recovered = recovered["exchange_ts"].head(1)[0]
+    recovery_sec = (first_recovered - event_ts).total_seconds()
+    return (float(pre_spread), float(post_spread_max), float(recovery_sec))

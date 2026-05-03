@@ -3,7 +3,8 @@
 `pandas_market_calendars` を使い, NYSE / CME futures (CMES_GLOBEX) の
 祝日カレンダーと early close / late open を取得する.
 
-Phase 1 では年単位で 1 度キャッシュ. 過去N年 + 未来1年を持つ.
+Phase 1 では年単位で 1 度キャッシュ. 既定で「現在年-2 〜 現在年+1」を持つ.
+Gemini指摘反映: ハードコード年を datetime.now() ベースに変更.
 """
 
 from __future__ import annotations
@@ -15,9 +16,18 @@ import pandas as pd
 import pandas_market_calendars as mcal
 
 
+def _default_year_range() -> tuple[int, int]:
+    now_year = datetime.now(UTC).year
+    return (now_year - 2, now_year + 1)
+
+
 @lru_cache(maxsize=1)
-def get_nyse_holidays(start_year: int = 2024, end_year: int = 2027) -> set[date]:
+def get_nyse_holidays(start_year: int | None = None, end_year: int | None = None) -> set[date]:
     """NYSE 完全休場の date set."""
+    if start_year is None or end_year is None:
+        s, e = _default_year_range()
+        start_year = start_year or s
+        end_year = end_year or e
     cal = mcal.get_calendar("NYSE")
     schedule = cal.schedule(start_date=f"{start_year}-01-01", end_date=f"{end_year}-12-31")
     open_days = {ts.date() for ts in schedule.index}
@@ -36,12 +46,18 @@ def get_nyse_holidays(start_year: int = 2024, end_year: int = 2027) -> set[date]
 
 
 @lru_cache(maxsize=1)
-def get_nyse_early_close_dates(start_year: int = 2024, end_year: int = 2027) -> dict[date, time]:
+def get_nyse_early_close_dates(
+    start_year: int | None = None, end_year: int | None = None
+) -> dict[date, time]:
     """NYSE early close 日とその close 時刻 (ET).
 
     Returns:
         { date: close_time_et }  — 普通日は含まれない (13:00 ET など half-day のみ)
     """
+    if start_year is None or end_year is None:
+        s, e = _default_year_range()
+        start_year = start_year or s
+        end_year = end_year or e
     cal = mcal.get_calendar("NYSE")
     schedule = cal.schedule(start_date=f"{start_year}-01-01", end_date=f"{end_year}-12-31")
     if "market_close" not in schedule.columns:

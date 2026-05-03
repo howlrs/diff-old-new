@@ -15,11 +15,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import polars as pl
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+from _common import safe_read_parquet_glob  # noqa: E402
 
 from src.config import load_config  # noqa: E402
 from src.l2_features.regime import classify_regime  # noqa: E402
@@ -48,15 +49,6 @@ def _summarize(values: list[float]) -> dict[str, Any]:
     }
 
 
-def _read_parquet(glob: str) -> pl.DataFrame:
-    con = duckdb.connect(":memory:")
-    arrow_tbl = con.execute(f"SELECT * FROM read_parquet('{glob}', union_by_name=true)").arrow()
-    df = pl.from_arrow(arrow_tbl)
-    if isinstance(df, pl.Series):
-        df = df.to_frame()
-    return df
-
-
 def compute_k9() -> dict[str, Any]:
     cfg = load_config(
         [
@@ -68,8 +60,8 @@ def compute_k9() -> dict[str, Any]:
     trades_glob = str(raw / "trades" / "**" / "*.parquet")
     l2_glob = str(raw / "l2book" / "**" / "*.parquet")
 
-    trades = _read_parquet(trades_glob)
-    l2 = _read_parquet(l2_glob)
+    trades = safe_read_parquet_glob(trades_glob)
+    l2 = safe_read_parquet_glob(l2_glob)
 
     if trades.is_empty() or l2.is_empty():
         return {"warning": "no trades or l2 data"}
