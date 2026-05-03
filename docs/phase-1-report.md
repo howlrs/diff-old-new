@@ -3,6 +3,9 @@
 最終更新: 2026-05-04
 Tag: `v0.1.0`
 
+> **追記 (2026-05-04)**: Phase 3 の中で **Rust executor 80% プロトタイプ** が完了 (PR-1〜PR-8).
+> 詳細は [`executor/`](executor/README.md) を参照. 鍵管理 + 実 HL POST のみ未実装.
+
 ## ビジョン (再掲)
 オールド金融 (CME/NYSE/NASDAQ) と新金融 (Hyperliquid HIP-3 / Trade[XYZ]) の **構造的接続点と切断点** を観測し、繰り返し可能な統計的優位 (LLN/CLT) を発見・収益化する.
 
