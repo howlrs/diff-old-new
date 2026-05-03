@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## v0.2.0 — 2026-05-04 (Phase 2 tooling + LiveEngine dry-run)
+
+Phase 2 KPI ツール + 戦略 H2/H3 + LiveEngine dry-run まで完了. 1週間 collect 後に実分布で全 KPI を実行可能な状態.
+
+### Added
+- **Phase 2 KPI ツール (PR #40)**:
+  - src/l2_features/distribution.py: Hill 推定 + Shapiro-Wilk + Welch t-test
+  - scripts/kpi_fat_tail.py: regime 別ファットテール判定
+  - scripts/kpi_regime_diff_test.py: pairwise Welch t-test
+  - tests/test_distribution.py: 6 tests (Pareto/normal 判定確認済)
+- **戦略 H2 / H3 (PR #41)**:
+  - strategies/h2_crypto_native.py: closure 中の BTC リターン同方向ベット
+  - strategies/h3_cme_maintenance.py: CME メンテ時間 mini-closure mean reversion
+  - tests/test_h2_h3_strategies.py: 6 tests
+- **LiveEngine dry-run (PR #42)**:
+  - src/l3_strategy/live.py: BacktestEngine と同じ Strategy.on_bar を呼ぶ
+  - cli.py に live コマンド (h1 / h3 を選択して dry-run 起動)
+  - tests/test_live_engine.py: 3 tests
+  - 実発注は Phase 3 で別途対応 (EIP-712 hot wallet 等)
+
+### Tests
+- 46 / 46 pytest pass
+- ruff + format clean
+
+### Issues closed
+すべての Open Issues を close. 次フェーズ用の Issue は Phase 3 ブレストで起票.
+
 ## v0.1.0 — 2026-05-04 (Phase 1 完了)
 
 Phase 1 のコア骨格 + 実データ動作確認 + 全 KPI スクリプト実装. tag付きリリース.
