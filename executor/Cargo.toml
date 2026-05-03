@@ -23,8 +23,8 @@ tokio = { version = "1.52", features = ["full"] }
 futures = "0.3"
 async-trait = "0.1"
 
-# HTTP / WS
-reqwest = { version = "0.13", features = ["json", "rustls-tls"], default-features = false }
+# HTTP / WS (reqwest 0.13 feature 名: rustls + webpki-roots, rustls-no-provider で aws-lc-rs を pull しない)
+reqwest = { version = "0.13", features = ["json", "rustls", "webpki-roots"], default-features = false }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
 # Serialization
