@@ -19,7 +19,8 @@ Hyperliquid (HIP-3 / Trade[XYZ]) 上の **米株指数 perpetual** と **オー�
 - [x] **LiveEngine dry-run** (BacktestEngine と同一 Strategy ABC を継承)
 - [x] **Analytics dashboard** (marimo + altair, Sharpe/Sortino/DD 等 8 KPI + KPI カード + 自由探索)
 - [x] CI (ruff/format/mypy/pytest), **61/61 tests pass**
-- [ ] Phase 3 (実発注 + EIP-712 鍵管理 + キル スイッチ)
+- [x] **Rust executor 80% プロトタイプ完了** — 4 algorithms (MARKET / PASSIVE / TWAP / MM) + axum REST+WS + Python connector + CLI ([`docs/executor/`](docs/executor/README.md))
+- [ ] Phase 3.5 (鍵管理 + EIP-712 signer + Real HL POST + Auth レイヤ)
 
 ## Quick start
 ```bash
@@ -34,6 +35,11 @@ python scripts/audit_quality.py                        # → docs/audit/D_qualit
 # GUI
 marimo edit notebooks/dashboard.py                     # 編集モード
 marimo run  notebooks/dashboard.py                     # 発表モード
+
+# Rust executor (keyless mock 構成で動作確認)
+cd executor && cargo run -p executor-server --release  # port 8085 で起動
+cargo run -p executor-cli -- health                    # 別 terminal で疎通確認
+# 詳細: docs/executor/README.md
 ```
 
 ## アーキテクチャ
