@@ -1,0 +1,102 @@
+[project]
+name = "diff-old-new"
+version = "0.1.0"
+description = "Old/New 金融の構造的差分を活用した、繰り返し可能な統計的優位の発見"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "howlrs", email = "sharebook.amazon@gmail.com" },
+]
+keywords = ["hyperliquid", "perpetuals", "trade-xyz", "statistical-arbitrage", "quant"]
+
+dependencies = [
+    # Hyperliquid
+    "hyperliquid-python-sdk>=0.7.0",
+    "websockets>=13.0",
+    "httpx>=0.27.0",
+    # Data
+    "polars>=1.10.0",
+    "duckdb>=1.1.0",
+    "pyarrow>=18.0",
+    # Numerics / stats
+    "numpy>=2.1.0",
+    "scipy>=1.14.0",
+    # Config / logging
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "pyyaml>=6.0",
+    "structlog>=24.4.0",
+    # CLI
+    "typer>=0.13.0",
+    # Time / TZ
+    "pendulum>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "hypothesis>=6.115.0",
+    "ruff>=0.7.0",
+    "mypy>=1.13.0",
+]
+notebook = [
+    "jupyter>=1.1.0",
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.0",
+]
+
+[project.scripts]
+diff-old-new = "src.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",  # line too long (formatter handles)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["duckdb.*", "hyperliquid.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra -q --strict-markers"
+markers = [
+    "slow: long-running tests (integration, end-to-end)",
+    "live: tests that hit live HL API (skip in CI)",
+]

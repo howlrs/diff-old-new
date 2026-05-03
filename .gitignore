@@ -1,0 +1,54 @@
+# Data (raw / curated は git管理しない、容量大)
+data/raw/
+data/curated/
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# Secrets
+.env
+.env.*
+!.env.example
+config/local.yaml
+config/secrets.yaml
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+.tox/
+
+# venv / uv
+.venv/
+venv/
+env/
+.uv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Notebooks scratch
+.ipynb_checkpoints/
+*.ipynb
+notebooks/scratch/
