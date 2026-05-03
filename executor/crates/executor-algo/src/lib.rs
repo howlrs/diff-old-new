@@ -11,15 +11,21 @@
 //! - PR-4: [`PassiveFollowAlgorithm`] (post-only ALO at touch, individual
 //!   cancel/repost on book movement)
 //! - PR-5: [`TwapAlgorithm`] (time-weighted slicing over MARKET / PASSIVE)
+//! - PR-6: [`MarketMakeAlgorithm`] (target-driven two-sided ALO market making)
 
 #![forbid(unsafe_code)]
 
 pub mod algorithm;
 pub mod market;
+pub mod market_make;
 pub mod passive_follow;
 pub mod twap;
 
-pub use algorithm::{build_report, collect_own_fills, Algorithm, ExecutionContext, ProgressTx};
+pub use algorithm::{
+    build_report, collect_own_fills, drain_new_fills, ensure_book_fresh, taker_limit_price,
+    Algorithm, ExecutionContext, ProgressTx,
+};
 pub use market::{MarketAlgorithm, MarketParams};
+pub use market_make::{MarketMakeAlgorithm, MarketMakeParams};
 pub use passive_follow::{PassiveFollowAlgorithm, PassiveFollowParams};
 pub use twap::{TwapAlgorithm, TwapChild, TwapParams};
