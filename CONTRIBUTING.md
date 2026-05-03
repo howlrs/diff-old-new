@@ -14,6 +14,20 @@ docs/{topic}           ← ドキュメントのみ
 - PR は `develop` に向けて作る (Phase完了で `develop` → `main`)
 - 命名: `feat/issue-12-l1-ws-client`、`fix/issue-25-ema-edge-case`
 
+## Push 前検証 (CI 失敗の再発防止)
+
+Gemini partner レビュー (2026-05-04) で確立した手順:
+
+```bash
+bash scripts/check_ci_local.sh   # CI と同じコマンドをローカル実行
+```
+
+これが green な状態でしか push しない. 失敗したら修正してから push.
+
+依存追加時:
+- `pyproject.toml` の該当 extra (gui / audit / ...) に追加した後,
+  必ず `all` extra にも反映する (CI が `.[dev,all]` を install するため).
+
 ## Definition of Done (DoD)
 
 各 Issue / PR は以下を満たす:

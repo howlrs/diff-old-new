@@ -61,6 +61,17 @@ audit = [
     # DuckDB の datetime 計算で必要
     "pytz>=2025.1",
 ]
+# "all" は dev 以外 (= 機能 extras) をまとめたメタ extra.
+# CI / ローカル全部入り環境用. extras を増やしたら必ずここにも追加する.
+all = [
+    # gui
+    "marimo[recommended]~=0.23.4",
+    "altair~=6.1.0",
+    "pandas>=2.0",
+    # audit
+    "yfinance~=1.3.0",
+    "pytz>=2025.1",
+]
 
 [project.scripts]
 diff-old-new = "src.cli:app"
