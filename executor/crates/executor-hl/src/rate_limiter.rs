@@ -6,7 +6,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 /// Tokens are scaled to integer "milli-tokens" (1 token = 1000 mtoken) so we
@@ -23,8 +22,6 @@ pub struct TokenBucket {
     /// Last refill instant (millis since `start`).
     start: Instant,
     last_refill_ms: AtomicU64,
-    /// Mutex used only for the await/wait path to coordinate sleepers.
-    waker_lock: Mutex<()>,
 }
 
 impl TokenBucket {
@@ -38,7 +35,6 @@ impl TokenBucket {
             tokens_mtokens: AtomicU64::new(capacity_mtokens),
             start: Instant::now(),
             last_refill_ms: AtomicU64::new(0),
-            waker_lock: Mutex::new(()),
         }
     }
 
@@ -122,13 +118,12 @@ impl TokenBucket {
                 return start.elapsed().as_millis() as u64;
             }
 
-            // Wait for the next refill that yields `n` tokens.
-            // 必要なミリ秒 = (needed - cur) / refill_per_sec_mtokens * 1000
+            // 不足分を補うのに必要な ms.
+            // Gemini PR-2 review 反映: ロックを取らずに sleep する (各 task 並列待機).
+            // 直列化していた `waker_lock.lock().await` を撤去 → HoL blocking 解消.
             let cur = self.tokens_mtokens.load(Ordering::Acquire);
             let deficit = needed.saturating_sub(cur);
             let wait_ms = (deficit.saturating_mul(1000) / self.refill_per_sec_mtokens).max(1);
-
-            let _guard = self.waker_lock.lock().await;
             sleep(Duration::from_millis(wait_ms)).await;
         }
     }

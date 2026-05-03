@@ -175,12 +175,13 @@ impl HlClient for MockHlClient {
     }
 }
 
-/// 0–u32::MAX の擬似 oid (mock 用).
+/// 擬似 oid (mock 用).
+/// Gemini PR-2 review: nanos は u64 飽和に近いので micros 採用.
 fn rand_oid() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
+        .map(|d| d.as_micros() as u64)
         .unwrap_or_default()
 }
 

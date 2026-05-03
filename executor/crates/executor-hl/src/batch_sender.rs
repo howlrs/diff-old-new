@@ -164,35 +164,65 @@ async fn flush_now<C: HlClient>(client: &Arc<C>, buffer: &mut Vec<Envelope>) {
     if buffer.is_empty() {
         return;
     }
-    // Split into orders and cancels (HL recommends separate batches for ALO
-    // vs IOC/GTC; we keep all orders together for now and split cancels off).
+    // Gemini PR-2 review 反映: order と cancel を別々の ack 群で管理し,
+    // それぞれの batch 結果を ack に伝搬する (失敗時は Err).
     let mut orders: Vec<OrderIntent> = Vec::new();
+    let mut order_acks: Vec<oneshot::Sender<Result<(), HlError>>> = Vec::new();
     let mut cancels: Vec<CancelIntent> = Vec::new();
-    let mut acks: Vec<Option<oneshot::Sender<Result<(), HlError>>>> = Vec::new();
+    let mut cancel_acks: Vec<oneshot::Sender<Result<(), HlError>>> = Vec::new();
     for env in buffer.drain(..) {
         match env.item {
-            OrderOrCancel::Place(o) => orders.push(o),
-            OrderOrCancel::Cancel(c) => cancels.push(c),
+            OrderOrCancel::Place(o) => {
+                orders.push(o);
+                if let Some(a) = env.ack {
+                    order_acks.push(a);
+                }
+            }
+            OrderOrCancel::Cancel(c) => {
+                cancels.push(c);
+                if let Some(a) = env.ack {
+                    cancel_acks.push(a);
+                }
+            }
         }
-        acks.push(env.ack);
     }
 
     if !orders.is_empty() {
-        match client.place_orders(&orders).await {
+        let res = client.place_orders(&orders).await;
+        match &res {
             Ok(_) => tracing::trace!("flusher: placed {} orders", orders.len()),
             Err(e) => tracing::error!("flusher: place_orders failed: {e}"),
         }
+        let summary = res.map(|_| ()).map_err(format_batch_err);
+        for ack in order_acks {
+            let _ = ack.send(clone_unit_result(&summary));
+        }
     }
     if !cancels.is_empty() {
-        match client.cancel_orders(&cancels).await {
+        let res = client.cancel_orders(&cancels).await;
+        match &res {
             Ok(_) => tracing::trace!("flusher: cancelled {} orders", cancels.len()),
             Err(e) => tracing::error!("flusher: cancel_orders failed: {e}"),
         }
+        let summary = res.map(|_| ()).map_err(format_batch_err);
+        for ack in cancel_acks {
+            let _ = ack.send(clone_unit_result(&summary));
+        }
     }
-    // Per-item ack is best-effort; we report Ok to all on a successful batch
-    // for now (PR-3+ refines per-cloid acks via WS confirmation).
-    for ack in acks.into_iter().flatten() {
-        let _ = ack.send(Ok(()));
+}
+
+/// HlError は Clone を持たないため, ack 1 つ毎に再生成する.
+fn clone_unit_result(r: &Result<(), HlError>) -> Result<(), HlError> {
+    match r {
+        Ok(()) => Ok(()),
+        Err(e) => Err(HlError::Network(format!("{e}"))),
+    }
+}
+
+fn format_batch_err(e: HlError) -> HlError {
+    match e {
+        HlError::RateLimited { wait_ms } => HlError::RateLimited { wait_ms },
+        other => HlError::Network(format!("batch failed: {other}")),
     }
 }
 
