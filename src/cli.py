@@ -93,5 +93,32 @@ def backtest(
             print("[NG] サンプル不足 or エッジ未確認")
 
 
+@app.command()
+def live(strategy: str = typer.Argument("h1", help="strategy id (h1/h3)")) -> None:
+    """L3 LiveEngine dry-run: 実 WS から MarketState を流して Signal をログ出力 (発注なし).
+
+    Phase 3 で実発注対応予定. 現状は dry-run のみ.
+    """
+    from src.l3_strategy.live import LiveEngine, _install_signal_handlers
+    from src.l3_strategy.strategies.h1_closure_mean_rev import H1ClosureMeanReversion
+    from src.l3_strategy.strategies.h3_cme_maintenance import H3CmeMaintenance
+
+    cfg = _load()
+    if strategy == "h1":
+        strat = H1ClosureMeanReversion()
+    elif strategy == "h3":
+        strat = H3CmeMaintenance()
+    else:
+        raise typer.BadParameter(f"Unknown strategy for live: {strategy}")
+
+    async def _amain() -> None:
+        engine = LiveEngine(cfg, strat, dry_run=True)
+        loop = asyncio.get_running_loop()
+        _install_signal_handlers(loop, engine)
+        await engine.run()
+
+    asyncio.run(_amain())
+
+
 if __name__ == "__main__":
     app()

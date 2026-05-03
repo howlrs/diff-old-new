@@ -1,0 +1,72 @@
+{
+  "by_symbol": {
+    "xyz:SP500": {
+      "R2_closure_weekend_vs_R3_closure_daily": {
+        "n_a": 6342,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      },
+      "R2_closure_weekend_vs_R4_closure_holiday": {
+        "n_a": 6342,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      },
+      "R3_closure_daily_vs_R4_closure_holiday": {
+        "n_a": 0,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      }
+    },
+    "xyz:XYZ100": {
+      "R2_closure_weekend_vs_R3_closure_daily": {
+        "n_a": 6342,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      },
+      "R2_closure_weekend_vs_R4_closure_holiday": {
+        "n_a": 6342,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      },
+      "R3_closure_daily_vs_R4_closure_holiday": {
+        "n_a": 0,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      }
+    },
+    "BTC": {
+      "R2_closure_weekend_vs_R3_closure_daily": {
+        "n_a": 6342,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      },
+      "R2_closure_weekend_vs_R4_closure_holiday": {
+        "n_a": 6342,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      },
+      "R3_closure_daily_vs_R4_closure_holiday": {
+        "n_a": 0,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      }
+    },
+    "ETH": {
+      "R2_closure_weekend_vs_R3_closure_daily": {
+        "n_a": 6342,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      },
+      "R2_closure_weekend_vs_R4_closure_holiday": {
+        "n_a": 6342,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      },
+      "R3_closure_daily_vs_R4_closure_holiday": {
+        "n_a": 0,
+        "n_b": 0,
+        "warning": "insufficient samples"
+      }
+    }
+  }
+}

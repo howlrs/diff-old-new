@@ -1,0 +1,172 @@
+{
+  "by_symbol": {
+    "xyz:SP500": {
+      "R1_active": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      },
+      "R2_closure_weekend": {
+        "n": 6342,
+        "mean": -0.04843472090825059,
+        "std": 3.2211401260302637,
+        "skewness": 0.7533223355449276,
+        "kurtosis": -0.3293866624269879,
+        "hill_alpha": 3.523716370128196,
+        "shapiro_pvalue": 2.957520305055387e-114,
+        "is_heavy_tail": true
+      },
+      "R3_closure_daily": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      },
+      "R4_closure_holiday": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      }
+    },
+    "xyz:XYZ100": {
+      "R1_active": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      },
+      "R2_closure_weekend": {
+        "n": 6342,
+        "mean": 3.8941185745821243,
+        "std": 12.951425422336266,
+        "skewness": 0.30451247122649117,
+        "kurtosis": -0.21438244948242513,
+        "hill_alpha": 3.6601991966853547,
+        "shapiro_pvalue": 2.143919188844885e-24,
+        "is_heavy_tail": true
+      },
+      "R3_closure_daily": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      },
+      "R4_closure_holiday": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      }
+    },
+    "BTC": {
+      "R1_active": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      },
+      "R2_closure_weekend": {
+        "n": 6342,
+        "mean": -35.01843267108147,
+        "std": 7.282648247932425,
+        "skewness": -0.4171121733731497,
+        "kurtosis": -0.26066596529992125,
+        "hill_alpha": 12.999053287802102,
+        "shapiro_pvalue": 8.37714149698451e-43,
+        "is_heavy_tail": false
+      },
+      "R3_closure_daily": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      },
+      "R4_closure_holiday": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      }
+    },
+    "ETH": {
+      "R1_active": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      },
+      "R2_closure_weekend": {
+        "n": 6342,
+        "mean": -1.0182639545884777,
+        "std": 0.15601186294039016,
+        "skewness": 0.3877996239129457,
+        "kurtosis": 0.7655575851611753,
+        "hill_alpha": 14.14423487224671,
+        "shapiro_pvalue": 2.2612744453460577e-51,
+        "is_heavy_tail": false
+      },
+      "R3_closure_daily": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      },
+      "R4_closure_holiday": {
+        "n": 0,
+        "mean": 0.0,
+        "std": 0.0,
+        "skewness": 0.0,
+        "kurtosis": 0.0,
+        "hill_alpha": null,
+        "shapiro_pvalue": null,
+        "is_heavy_tail": false
+      }
+    }
+  }
+}
