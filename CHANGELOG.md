@@ -1,5 +1,36 @@
 # CHANGELOG
 
+## v0.4.0 — 2026-05-04 (Data audit pipeline — 信頼性監査の体系化)
+
+戦略の前提となる **HL Oracle / 取得データの信頼性** を 4 層で体系的に監査する仕組み.
+Gemini partner と相談し推奨順序 A→B→D で実装.
+
+### Added
+- **`src/audit/schema_check.py` (Audit-A0)**: 全 Parquet の datetime tz-aware / 必須カラム / dtype 確認
+- **`src/audit/internal_consistency.py` (Audit-A)**: recv_ts vs exchange_ts ドリフト, WS gap, mid jump, oracle vs mid, 板健全性
+- **`src/audit/external_benchmark.py` (Audit-B, Gemini最優先)**:
+  - BTC/ETH oracle vs Binance+Bybit+OKX weighted median (公式 weight 3:2:2 再現)
+  - xyz:SP500 oracle vs SPY (yfinance, active session のみ)
+  - 1分粒度 floor アライメント (Gemini指摘の罠回避)
+- **`src/audit/quality_score.py` (Audit-D)**: 0-100 score (internal 70 + external 30) + closure 期待値ロジック
+- **scripts/audit_*.py (4 entry points)** + `docs/audit/{A0,A,B,D}.md` 自動生成
+- **marimo dashboard 統合**: Audit セクションで現在の data quality を一目表示
+- **`pyproject.toml` audit extra**: yfinance + pytz
+
+### 実 audit 結果 (3h 蓄積データ)
+- BTC: 100.0 ✓ (相関 0.9792 vs CEX, median diff -0.18bps → **HL Oracle 信頼性実証**)
+- ETH: 100.0 ✓
+- xyz:SP500/XYZ100: 95.0 ✓ (週末で SPY 休場, 期待動作)
+- internal: latency median 343ms / p99 785ms 全銘柄健全
+- 価格ジャンプ 0, 板 crossed 0 → データ品質高い
+
+### Tests
+- 71 / 71 pytest pass (新規 10 audit tests)
+- ruff / format clean
+
+### 主要 PR
+- PR #50: data audit pipeline (A0+A+B+D)
+
 ## v0.3.0 — 2026-05-04 (Analytics dashboard — marimo + altair)
 
 戦略 backtest と KPI を 1 画面で対話的に観測する **marimo ベース GUI** を導入.

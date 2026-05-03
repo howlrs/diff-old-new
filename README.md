@@ -5,7 +5,9 @@
 Hyperliquid (HIP-3 / Trade[XYZ]) 上の **米株指数 perpetual** と **オールド金融 (CME e-mini, NYSE/NASDAQ)** の **Oracle 二重構造** をデータで観測し、**closure (週末・CMEメンテ・祝日) 中の HL 独自価格発見** に由来するアルファを統計的に検証する。
 
 ## ステータス
-**Analytics dashboard 完備 (v0.3.0)** — Phase 1 詳細: [`docs/phase-1-report.md`](docs/phase-1-report.md), 履歴: [CHANGELOG](CHANGELOG.md)
+**Data audit pipeline 完備 (v0.4.0)** — Phase 1 詳細: [`docs/phase-1-report.md`](docs/phase-1-report.md), 履歴: [CHANGELOG](CHANGELOG.md)
+
+**HL Oracle 信頼性実証**: BTC oracle が外部 CEX (Binance:OKX:Bybit weighted median) と相関 **0.9792**, median diff -0.18bps → 戦略の前提が信頼に足ることを実データで実証.
 
 - [x] Phase 0: HL 仕様調査 完了 (`docs/specs/2026-05-04-phase0-spec-notes.md`)
 - [x] v3 設計 確定 (`docs/specs/2026-05-04-v3-design.md`)
@@ -19,14 +21,19 @@ Hyperliquid (HIP-3 / Trade[XYZ]) 上の **米株指数 perpetual** と **オー�
 - [x] CI (ruff/format/mypy/pytest), **61/61 tests pass**
 - [ ] Phase 3 (実発注 + EIP-712 鍵管理 + キル スイッチ)
 
-## Quick start (analytics dashboard)
+## Quick start
 ```bash
-pip install -e ".[dev,gui]"
-python -m src.cli collect                              # L1 (Ctrl-C で停止)
-python -m src.cli features                             # L2
-python -m src.cli backtest h1 --symbol xyz:SP500       # L3 (Parquet 自動保存)
-marimo edit notebooks/dashboard.py                     # GUI (編集)
-marimo run  notebooks/dashboard.py                     # GUI (発表)
+pip install -e ".[dev,gui,audit]"                      # 全部入り
+python -m src.cli collect                              # L1 データ収集 (Ctrl-C で停止)
+python -m src.cli features                             # L2 features 生成
+python -m src.cli backtest h1 --symbol xyz:SP500       # L3 backtest (Parquet 自動保存)
+
+# データ信頼性監査
+python scripts/audit_quality.py                        # → docs/audit/D_quality_score.md
+
+# GUI
+marimo edit notebooks/dashboard.py                     # 編集モード
+marimo run  notebooks/dashboard.py                     # 発表モード
 ```
 
 ## アーキテクチャ
