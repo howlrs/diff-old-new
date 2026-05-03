@@ -30,8 +30,11 @@ dependencies = [
     "structlog~=25.5.0",
     # CLI
     "typer~=0.25.1",
-    # Time / TZ
+    # Time / TZ / Market calendar
     "pendulum~=3.2.0",
+    "pandas-market-calendars~=5.3.2",
+    # Time series stats (Engle-Granger, ADF, etc)
+    "statsmodels~=0.14.6",
 ]
 
 [project.optional-dependencies]
