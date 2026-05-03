@@ -104,7 +104,7 @@ impl MarketParams {
 ///
 /// - `Open` / `SetTarget`: side = sign(target_size), size = |target_size - current|
 /// - `Close`: opposite of current position, size = min(|target|, |current|)
-fn resolve_side_and_size(
+pub(crate) fn resolve_side_and_size(
     intent: Intent,
     target_size: Decimal,
     current_size: Decimal,
@@ -155,7 +155,7 @@ fn resolve_side_and_size(
 /// Reject the book if its WS timestamp is missing or older than `max_age`.
 /// Gemini PR-3 review: a disconnected WS would otherwise leave a stale book
 /// in `AppState`, and the algo would happily trade against frozen prices.
-fn ensure_book_fresh(
+pub(crate) fn ensure_book_fresh(
     book: &executor_core::state::OrderBook,
     max_age: Option<Duration>,
 ) -> Result<(), AlgoError> {
