@@ -223,6 +223,71 @@ pub async fn cancel_exec(
     }))
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EmergencyStopResponse {
+    /// Number of running executions that received the abort signal.
+    pub aborted_executions: usize,
+    /// Number of resting orders cancelled across all symbols.
+    pub cancelled_orders: usize,
+}
+
+/// `POST /v1/emergency_stop` — kill switch.
+///
+/// Gemini PR-8 review: order matters. Cancel resting orders FIRST so they
+/// stop trading even if a still-running algo is about to enqueue more —
+/// then abort the algos so they don't repost. Both signals are dispatched
+/// before the function returns; the actual cancellation hits HL on the
+/// next BatchSender flush (≤100 ms).
+///
+/// Operator auditability: the request may set `X-Operator-ID` so the log
+/// line records who triggered the stop.
+pub async fn emergency_stop(
+    State(s): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<EmergencyStopResponse>, ServerError> {
+    use executor_core::intent::CancelIntent;
+    use executor_hl::batch_sender::OrderOrCancel;
+
+    let operator = headers
+        .get("x-operator-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+
+    // Step 1: snapshot open orders + enqueue cancels (cancel before abort).
+    let open_orders: Vec<_> = {
+        let g = s.app_state.open_orders.read().await;
+        g.values().cloned().collect()
+    };
+    let mut cancelled = 0usize;
+    for order in open_orders {
+        let intent = CancelIntent {
+            symbol: order.symbol.clone(),
+            by_cloid: Some(order.cloid),
+            by_oid: order.oid,
+        };
+        if s.batch_sender
+            .enqueue(OrderOrCancel::Cancel(intent))
+            .is_ok()
+        {
+            cancelled += 1;
+        }
+    }
+
+    // Step 2: abort all running executions (so they stop reposting).
+    let aborted_executions = s.registry.abort_all().await;
+
+    tracing::warn!(
+        operator,
+        aborted_executions,
+        cancelled_orders = cancelled,
+        "emergency_stop dispatched"
+    );
+    Ok(Json(EmergencyStopResponse {
+        aborted_executions,
+        cancelled_orders: cancelled,
+    }))
+}
+
 fn parse_exec_id(s: &str) -> Result<ExecutionId, ServerError> {
     use std::str::FromStr;
     uuid::Uuid::from_str(s)
