@@ -49,17 +49,18 @@ def features(
 
 @app.command()
 def backtest(
-    strategy: str = typer.Argument("h1", help="strategy id"),
-    symbol: str = typer.Option("SP500", help="対象 symbol"),
+    strategy: str = typer.Argument("h1", help="strategy id (h1/h3)"),
+    symbol: str = typer.Option("xyz:SP500", help="対象 symbol"),
     day: str | None = typer.Option(None, help="ISO date"),
     exit_min: int = typer.Option(60, help="exit_after_minutes"),
+    save: bool = typer.Option(True, help="data/curated/backtest_results/ に Parquet 保存"),
 ) -> None:
-    """L3: 指定戦略を curated features に対して backtest."""
+    """L3: 指定戦略を curated features に対して backtest. 結果は GUI が読める形式で保存."""
     from src.l2_features.loader import load_features
     from src.l3_strategy.backtest import BacktestEngine
-    from src.l3_strategy.strategies.h1_closure_mean_rev import (
-        H1ClosureMeanReversion,
-    )
+    from src.l3_strategy.persistence import save_backtest_result
+    from src.l3_strategy.strategies.h1_closure_mean_rev import H1ClosureMeanReversion
+    from src.l3_strategy.strategies.h3_cme_maintenance import H3CmeMaintenance
 
     cfg = _load()
     parsed = date_t.fromisoformat(day) if day else None
@@ -68,6 +69,8 @@ def backtest(
 
     if strategy == "h1":
         strat = H1ClosureMeanReversion()
+    elif strategy == "h3":
+        strat = H3CmeMaintenance()
     else:
         raise typer.BadParameter(f"Unknown strategy: {strategy}")
 
@@ -83,7 +86,6 @@ def backtest(
         f"win_rate={result.win_rate * 100:.1f}%"
     )
     if result.n_trades >= 30:
-        # CLT 95% 信頼区間
         ci_low = result.mean_net_bps - 1.96 * result.se_bps
         ci_high = result.mean_net_bps + 1.96 * result.se_bps
         print(f"95% CI: [{ci_low:+.2f}, {ci_high:+.2f}] bps")
@@ -91,6 +93,18 @@ def backtest(
             print("[OK] コスト控除後期待値が95%信頼区間で正 (LLN/CLT 採否判定)")
         else:
             print("[NG] サンプル不足 or エッジ未確認")
+
+    if save and result.n_trades > 0:
+        out_path = save_backtest_result(
+            result,
+            cfg.storage,
+            symbol_filter=symbol,
+            exit_after_minutes=exit_min,
+            taker_fee_rate=cfg.cost.taker_fee_rate,
+            funding_multiplier=cfg.cost.funding_multiplier,
+        )
+        if out_path:
+            print(f"[saved] {out_path}")
 
 
 @app.command()
