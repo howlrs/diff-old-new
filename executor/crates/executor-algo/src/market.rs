@@ -152,34 +152,8 @@ pub(crate) fn resolve_side_and_size(
     }
 }
 
-/// Reject the book if its WS timestamp is missing or older than `max_age`.
-/// Gemini PR-3 review: a disconnected WS would otherwise leave a stale book
-/// in `AppState`, and the algo would happily trade against frozen prices.
-pub(crate) fn ensure_book_fresh(
-    book: &executor_core::state::OrderBook,
-    max_age: Option<Duration>,
-) -> Result<(), AlgoError> {
-    let Some(max_age) = max_age else {
-        return Ok(());
-    };
-    let ts = book
-        .ts
-        .ok_or_else(|| AlgoError::InvalidParams("market: book has no ts".into()))?;
-    let age = Utc::now() - ts;
-    let age_ms = age.num_milliseconds();
-    if age_ms < 0 {
-        // ts in the future — clock skew or tests with paused-time. Treat as
-        // fresh; the caller can disable the check via max_book_age=0.
-        return Ok(());
-    }
-    if (age_ms as u128) > max_age.as_millis() {
-        return Err(AlgoError::InvalidParams(format!(
-            "market: book stale ({age_ms}ms > {}ms)",
-            max_age.as_millis()
-        )));
-    }
-    Ok(())
-}
+// `ensure_book_fresh` lives in algorithm.rs as a shared helper.
+pub(crate) use crate::algorithm::ensure_book_fresh;
 
 /// Compute the IOC limit price including slippage cap.
 ///
