@@ -4,9 +4,13 @@
 hyperliquid:
   info_api_url: https://api.hyperliquid.xyz/info
   ws_url: wss://api.hyperliquid.xyz/ws
-  symbols:
-    - SP500
-    - XYZ100
+  # HIP-3 (Trade[XYZ] デプロイの米株 perp)
+  xyz_dex_name: xyz
+  xyz_symbols:
+    - xyz:SP500
+    - xyz:XYZ100
+  # core perp (validator-operated)
+  core_symbols:
     - BTC
     - ETH
   rest_poll_interval_sec: 60
@@ -15,6 +19,7 @@ hyperliquid:
   ws_reconnect_max_attempts: 100
   ws_reconnect_backoff_initial_sec: 1.0
   ws_reconnect_backoff_max_sec: 60.0
+  ws_stable_uptime_sec: 30.0
 
 storage:
   raw_data_root: data/raw

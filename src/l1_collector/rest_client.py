@@ -1,9 +1,11 @@
-"""Hyperliquid REST poller (meta / metaAndAssetCtxs / fundingHistory).
+"""Hyperliquid REST poller (meta / metaAndAssetCtxs / l2Book snapshot).
 
-責務:
-- 1分間隔で metaAndAssetCtxs を polling → AssetCtx を produce
-- fundingHistory は日次 batch で取得
-- gap recovery 用の l2book snapshot 取得
+dry-run (2026-05-04) で判明した HIP-3 仕様:
+- 米株 perp は dex="xyz" を指定して metaAndAssetCtxs を叩く
+- core perp (BTC/ETH 等) は dex="" (省略可)
+- 本クライアントは core/xyz の両方を1サイクルで polling し AssetCtx を produce
+
+Gemini指摘 (Bug 2) 反映: レスポンスの形式を防御的に検証.
 """
 
 from __future__ import annotations
@@ -22,8 +24,17 @@ from src.logging_setup import get_logger
 log = get_logger("l1.rest")
 
 
+def _f(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class HLRestClient:
-    """非同期 REST クライアント."""
+    """非同期 REST クライアント (HIP-3 dex 対応)."""
 
     def __init__(self, cfg: HyperliquidConfig) -> None:
         self.cfg = cfg
@@ -38,7 +49,7 @@ class HLRestClient:
                 resp = await self._client.post(self.cfg.info_api_url, json=payload)
                 resp.raise_for_status()
                 return resp.json()
-            except (TimeoutError, httpx.HTTPError) as exc:
+            except (TimeoutError, httpx.TimeoutException, httpx.HTTPError) as exc:
                 wait = min(2**attempt, 30)
                 log.warning(
                     "rest.error",
@@ -46,18 +57,30 @@ class HLRestClient:
                     wait=wait,
                     error=str(exc),
                     payload_type=payload.get("type"),
+                    payload_dex=payload.get("dex"),
                 )
                 await asyncio.sleep(wait)
         raise RuntimeError(f"REST request failed after retries: {payload}")
 
-    async def fetch_meta_and_asset_ctxs(self) -> list[AssetCtx]:
-        """metaAndAssetCtxs を取得して symbols 別の AssetCtx へ展開.
+    async def fetch_meta_and_asset_ctxs(
+        self,
+        dex: str,
+        target_symbols: list[str],
+    ) -> list[AssetCtx]:
+        """指定 dex の metaAndAssetCtxs を取得し AssetCtx へ展開.
 
-        Gemini指摘 (Bug 2) 反映: 空配列 / 形式違いを防御的にチェック.
+        Bug 2 反映: 空配列・形式違いを防御的にチェック.
         """
-        data = await self._post({"type": "metaAndAssetCtxs"})
+        payload: dict[str, Any] = {"type": "metaAndAssetCtxs"}
+        if dex:
+            payload["dex"] = dex
+        data = await self._post(payload)
         if not isinstance(data, list) or len(data) < 2:
-            log.warning("rest.unexpected_response", payload_type="metaAndAssetCtxs")
+            log.warning(
+                "rest.unexpected_response",
+                payload_type="metaAndAssetCtxs",
+                dex=dex,
+            )
             return []
         meta = data[0] if isinstance(data[0], dict) else {}
         ctxs = data[1] if isinstance(data[1], list) else []
@@ -66,58 +89,77 @@ class HLRestClient:
         out: list[AssetCtx] = []
         for asset, ctx in zip(universe, ctxs, strict=False):
             symbol = asset.get("name", "")
-            if symbol not in self.cfg.symbols:
+            if symbol not in target_symbols:
                 continue
-            funding = ctx.get("funding")
-            mark = ctx.get("markPx")
-            oracle = ctx.get("oraclePx")
-            day_volume = ctx.get("dayNtlVlm")
-            oi = ctx.get("openInterest")
+            if not isinstance(ctx, dict):
+                continue
             impact_pxs = ctx.get("impactPxs")
+            ib = ia = None
+            if isinstance(impact_pxs, list) and len(impact_pxs) >= 2:
+                ib = _f(impact_pxs[0])
+                ia = _f(impact_pxs[1])
             out.append(
                 AssetCtx(
                     symbol=symbol,
                     poll_ts=poll_ts,
-                    mark_px=float(mark) if mark is not None else None,
-                    oracle_px=float(oracle) if oracle is not None else None,
-                    funding_rate=float(funding) if funding is not None else None,
-                    open_interest=float(oi) if oi is not None else None,
-                    day_volume=float(day_volume) if day_volume is not None else None,
-                    impact_pxs=(
-                        (float(impact_pxs[0]), float(impact_pxs[1]))
-                        if impact_pxs and len(impact_pxs) == 2
-                        else None
-                    ),
+                    dex=dex,
+                    mark_px=_f(ctx.get("markPx")),
+                    oracle_px=_f(ctx.get("oraclePx")),
+                    mid_px=_f(ctx.get("midPx")),
+                    funding_rate=_f(ctx.get("funding")),
+                    premium=_f(ctx.get("premium")),
+                    open_interest=_f(ctx.get("openInterest")),
+                    day_volume=_f(ctx.get("dayNtlVlm")),
+                    day_base_volume=_f(ctx.get("dayBaseVlm")),
+                    prev_day_px=_f(ctx.get("prevDayPx")),
+                    impact_bid_px=ib,
+                    impact_ask_px=ia,
                 )
             )
         return out
 
+    async def fetch_all_asset_ctxs(self) -> list[AssetCtx]:
+        """core (dex="") と xyz の両方を一度に取得."""
+        results: list[AssetCtx] = []
+        if self.cfg.core_symbols:
+            results.extend(await self.fetch_meta_and_asset_ctxs("", self.cfg.core_symbols))
+        if self.cfg.xyz_symbols:
+            results.extend(
+                await self.fetch_meta_and_asset_ctxs(self.cfg.xyz_dex_name, self.cfg.xyz_symbols)
+            )
+        return results
+
     async def fetch_l2_snapshot(self, symbol: str) -> L2BookSnapshot | None:
-        """gap recovery 用: REST で板スナップショットを取得."""
+        """gap recovery 用の REST l2Book snapshot."""
         data = await self._post({"type": "l2Book", "coin": symbol})
-        if not data:
+        if not isinstance(data, dict):
             return None
         levels = data.get("levels") or [[], []]
-        bids = [L2BookLevel(**lv) for lv in levels[0][: self.cfg.l2book_levels]]
-        asks = [L2BookLevel(**lv) for lv in levels[1][: self.cfg.l2book_levels]]
+        bids_raw = levels[0][: self.cfg.l2book_levels] if len(levels) > 0 else []
+        asks_raw = levels[1][: self.cfg.l2book_levels] if len(levels) > 1 else []
+        bids = [L2BookLevel(**lv) for lv in bids_raw]
+        asks = [L2BookLevel(**lv) for lv in asks_raw]
         ts_field = data.get("time")
         recv_ts = datetime.now(UTC)
-        exchange_ts = datetime.fromtimestamp(int(ts_field) / 1000, tz=UTC) if ts_field else recv_ts
+        exchange_ts = (
+            datetime.fromtimestamp(int(ts_field) / 1000, tz=UTC)
+            if ts_field is not None
+            else recv_ts
+        )
         return L2BookSnapshot(
             symbol=symbol,
             exchange_ts=exchange_ts,
             recv_ts=recv_ts,
             bids=bids,
             asks=asks,
-            sequence=None,
             is_recovery_snapshot=True,
         )
 
     async def stream_asset_ctxs(self) -> AsyncIterator[list[AssetCtx]]:
-        """rest_poll_interval_sec ごとに AssetCtx 一括取得."""
+        """rest_poll_interval_sec ごとに core+xyz の AssetCtx を返す."""
         while True:
             try:
-                yield await self.fetch_meta_and_asset_ctxs()
+                yield await self.fetch_all_asset_ctxs()
             except Exception as exc:
                 log.error("rest.poll.error", error=str(exc))
             await asyncio.sleep(self.cfg.rest_poll_interval_sec)

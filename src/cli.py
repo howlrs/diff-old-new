@@ -8,13 +8,13 @@ from pathlib import Path
 
 import typer
 
-from src.config import load_config
+from src.config import AppConfig, load_config
 from src.logging_setup import setup_logging
 
 app = typer.Typer(help="diff-old-new CLI")
 
 
-def _load() -> tuple:
+def _load() -> AppConfig:
     cfg = load_config(
         [
             Path("config/default.yaml"),

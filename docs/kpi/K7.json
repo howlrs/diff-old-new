@@ -1,0 +1,6 @@
+{
+  "symbol": "xyz:SP500",
+  "n_total_bars": 112,
+  "n_daily_bars": 0,
+  "warning": "no R3 (CME daily maintenance) bars yet"
+}

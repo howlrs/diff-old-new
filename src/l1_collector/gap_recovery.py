@@ -36,8 +36,8 @@ class GapRecovery:
             "gap.detected",
             symbol=gap.symbol,
             reason=gap.reason,
-            last_seq=gap.last_seq,
-            new_seq=gap.new_seq,
+            last_seen_ts=gap.last_seen_ts.isoformat() if gap.last_seen_ts else None,
+            silence_sec=gap.silence_sec,
         )
         async with self._sem:
             snapshot = await self.rest.fetch_l2_snapshot(gap.symbol)
