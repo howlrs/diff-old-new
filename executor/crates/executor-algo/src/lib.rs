@@ -6,14 +6,17 @@
 //! observe fills through `state.recent_fills`, and stream `Progress` events
 //! to the executor server.
 //!
-//! PR-3 ships:
-//! - [`Algorithm`] trait + [`ExecutionContext`]
-//! - [`MarketAlgorithm`] (taker IOC with slippage cap)
+//! Shipped:
+//! - PR-3: [`Algorithm`] trait + [`ExecutionContext`] + [`MarketAlgorithm`]
+//! - PR-4: [`PassiveFollowAlgorithm`] (post-only ALO at touch, individual
+//!   cancel/repost on book movement)
 
 #![forbid(unsafe_code)]
 
 pub mod algorithm;
 pub mod market;
+pub mod passive_follow;
 
 pub use algorithm::{build_report, collect_own_fills, Algorithm, ExecutionContext, ProgressTx};
 pub use market::{MarketAlgorithm, MarketParams};
+pub use passive_follow::{PassiveFollowAlgorithm, PassiveFollowParams};
