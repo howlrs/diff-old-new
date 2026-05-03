@@ -1,0 +1,39 @@
+name: Bug
+description: 不具合 Issue
+labels: ["type:bug"]
+body:
+  - type: input
+    id: layer
+    attributes:
+      label: Layer
+      description: L1 / L2 / L3 / cross-cutting のどれか
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: 再現手順 (環境 / コマンド / 入力)
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs Actual
+    validations:
+      required: true
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of Done
+      value: |
+        - [ ] 再現テスト追加 (regression test)
+        - [ ] 修正、ruff/mypy 0、pytest pass
+        - [ ] Gemini レビュー (code review)
+        - [ ] SurrealDB knowledge に bug_fix として記録

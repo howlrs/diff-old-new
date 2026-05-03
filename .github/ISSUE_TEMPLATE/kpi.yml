@@ -1,0 +1,46 @@
+name: KPI
+description: KPI測定タスク (v3 design §3 参照)
+labels: ["type:kpi"]
+body:
+  - type: input
+    id: kpi_id
+    attributes:
+      label: KPI ID
+      placeholder: "K1"
+    validations:
+      required: true
+  - type: textarea
+    id: target
+    attributes:
+      label: 測定対象
+      description: 何を、どの分布/統計で計測するか
+    validations:
+      required: true
+  - type: textarea
+    id: data_required
+    attributes:
+      label: 必要データ (L1)
+    validations:
+      required: true
+  - type: textarea
+    id: feature_required
+    attributes:
+      label: 必要 feature (L2)
+    validations:
+      required: true
+  - type: textarea
+    id: deliverable
+    attributes:
+      label: Deliverable
+      description: docs/kpi/{KPI-ID}.md にレポート、図表は notebooks/ に保存
+    validations:
+      required: true
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of Done
+      value: |
+        - [ ] 測定スクリプト動作 (実データ)
+        - [ ] レポート: docs/kpi/{KPI-ID}.md
+        - [ ] 結果サマリーを SurrealDB output_log に保存
+        - [ ] Gemini analysis review (pro推奨)
