@@ -69,6 +69,8 @@ packages = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# marimo notebook は dependency injection 引数 (大文字 dataclass や useless expression 表現) を多用するため除外
+extend-exclude = ["notebooks/"]
 
 [tool.ruff.lint]
 select = [

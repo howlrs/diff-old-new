@@ -5,18 +5,29 @@
 Hyperliquid (HIP-3 / Trade[XYZ]) 上の **米株指数 perpetual** と **オールド金融 (CME e-mini, NYSE/NASDAQ)** の **Oracle 二重構造** をデータで観測し、**closure (週末・CMEメンテ・祝日) 中の HL 独自価格発見** に由来するアルファを統計的に検証する。
 
 ## ステータス
-**Phase 2 ツール完備 (v0.2.0)** — Phase 1 詳細: [`docs/phase-1-report.md`](docs/phase-1-report.md), 履歴: [CHANGELOG](CHANGELOG.md)
+**Analytics dashboard 完備 (v0.3.0)** — Phase 1 詳細: [`docs/phase-1-report.md`](docs/phase-1-report.md), 履歴: [CHANGELOG](CHANGELOG.md)
 
 - [x] Phase 0: HL 仕様調査 完了 (`docs/specs/2026-05-04-phase0-spec-notes.md`)
 - [x] v3 設計 確定 (`docs/specs/2026-05-04-v3-design.md`)
 - [x] L1 Data Ingestion (HIP-3 dex 対応, graceful shutdown, async I/O)
 - [x] L2 Feature Engineering (動的 calendar, cointegration, resilience, **distribution / Hill 推定**)
-- [x] L3 Strategy / Backtest (Strategy ABC, マルチポジ engine, cost model)
+- [x] L3 Strategy / Backtest (Strategy ABC, マルチポジ engine, cost model, **Parquet 永続化**)
 - [x] **戦略 H1 + H2 + H3** prototype (mean reversion / Crypto Native / CMEメンテ)
 - [x] KPI K1/K2/K7/K8/K9 + **fat-tail / regime t-test** スクリプト
 - [x] **LiveEngine dry-run** (BacktestEngine と同一 Strategy ABC を継承)
-- [x] CI (ruff/format/mypy/pytest), **46/46 tests pass**
+- [x] **Analytics dashboard** (marimo + altair, Sharpe/Sortino/DD 等 8 KPI + KPI カード + 自由探索)
+- [x] CI (ruff/format/mypy/pytest), **61/61 tests pass**
 - [ ] Phase 3 (実発注 + EIP-712 鍵管理 + キル スイッチ)
+
+## Quick start (analytics dashboard)
+```bash
+pip install -e ".[dev,gui]"
+python -m src.cli collect                              # L1 (Ctrl-C で停止)
+python -m src.cli features                             # L2
+python -m src.cli backtest h1 --symbol xyz:SP500       # L3 (Parquet 自動保存)
+marimo edit notebooks/dashboard.py                     # GUI (編集)
+marimo run  notebooks/dashboard.py                     # GUI (発表)
+```
 
 ## アーキテクチャ
 3層メダリオン (詳細は [`docs/specs/2026-05-04-v3-design.md`](docs/specs/2026-05-04-v3-design.md) §4):
