@@ -7,6 +7,10 @@ Hyperliquid (HIP-3 / Trade[XYZ]) への注文執行レイヤ (`executor/` 以下
 > 鍵管理 (`secrecy` / `zeroize` 統合, 実 EIP-712 signer) と HL への実 POST `/exchange` 以外
 > は全て実装済み。`MockHlClient` + `MockSigner` で keyless にエンドツーエンド動作する。
 
+> **次セッション着手時はまずこちら**:
+> - 引き継ぎメモ: [`../HANDOFF-2026-05-04.md`](../HANDOFF-2026-05-04.md)
+> - TODO チェックリスト: [`../TODO.md`](../TODO.md)
+
 ## 主要ドキュメント
 
 | 区分 | ファイル | 内容 |
