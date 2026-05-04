@@ -7,6 +7,9 @@ Hyperliquid (HIP-3 / Trade[XYZ]) 上の **米株指数 perpetual** と **オー�
 ## ステータス
 **Data audit pipeline 完備 (v0.4.0)** — Phase 1 詳細: [`docs/phase-1-report.md`](docs/phase-1-report.md), 履歴: [CHANGELOG](CHANGELOG.md)
 
+**Phase 3 進捗**: Rust executor 80% プロトタイプ完了 (PR-1〜PR-8 + docs).
+次セッション着手は [`docs/HANDOFF-2026-05-04.md`](docs/HANDOFF-2026-05-04.md) と [`docs/TODO.md`](docs/TODO.md) を参照.
+
 **HL Oracle 信頼性実証**: BTC oracle が外部 CEX (Binance:OKX:Bybit weighted median) と相関 **0.9792**, median diff -0.18bps → 戦略の前提が信頼に足ることを実データで実証.
 
 - [x] Phase 0: HL 仕様調査 完了 (`docs/specs/2026-05-04-phase0-spec-notes.md`)
