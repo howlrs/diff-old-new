@@ -119,18 +119,46 @@ User-signed action (UsdSend / Withdraw / SubAccount transfer) は本 PR スコ�
 
 ### 4.1 追加 workspace 依存
 
+crates.io 確認 (2026-05-05) で latest stable は以下:
+
+| crate | latest stable | 備考 |
+|---|---|---|
+| `alloy` (meta) | **2.0.4** | 2.0.2/2.0.3 は yanked. 2.0.4 が active. rust-version=1.91 要求 |
+| `alloy-sol-types` | 1.5.7 | meta 経由で自動取得 (個別指定不要) |
+| `alloy-signer-local` | 2.0.4 | meta 経由で自動取得 |
+| `rmp-serde` | **1.3.1** | 安定 |
+| `hex` | **0.4.3** | 安定 |
+
 `executor/Cargo.toml` の `[workspace.dependencies]` に追加:
 
 ```toml
-alloy = { version = "1", default-features = false, features = ["signer-local", "sol-types", "signers"] }
-rmp-serde = "1"
-hex = "0.4"
+alloy = { version = "2.0.4", default-features = false, features = ["signer-local", "sol-types", "signers"] }
+rmp-serde = "1.3.1"
+hex = "0.4.3"
 ```
 
 `executor-hl/Cargo.toml` の `[dependencies]` で workspace 経由参照.
 
-> **注**: alloy meta crate のバージョン pin は実装時に `cargo add` で確定する.
-> 上記 "1" は目安. workspace deps に書く時は patch まで指定して Cargo.lock 安定性を優先.
+### 4.2 Rust MSRV bump
+
+alloy 2.x が rust-version=1.91 を要求するため, workspace の MSRV を 1.85 → **1.91** に bump する.
+
+```toml
+# executor/Cargo.toml [workspace.package]
+rust-version = "1.91"
+```
+
+確認:
+- ローカル開発環境: `rustup update stable` で 1.91+ を確保 (現状 1.95+ で問題なし)
+- CI: `.github/workflows/ci.yml` は `dtolnay/rust-toolchain@stable` で最新 stable を取得 → 1.95+ 自動的に満たす
+- HANDOFF doc には 1.85 と記録されているが PR-B1 で更新する旨を引き継ぐ
+
+### 4.3 ライセンス確認
+
+新規追加の crate は全て workspace の Apache-2.0 と互換:
+- `alloy` ファミリー: MIT OR Apache-2.0
+- `rmp-serde`: MIT
+- `hex`: MIT OR Apache-2.0
 
 ## 5. 実装設計
 
