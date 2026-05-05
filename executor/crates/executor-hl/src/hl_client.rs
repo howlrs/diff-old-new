@@ -375,10 +375,18 @@ pub struct RealHlClient {
     pub signer: Arc<dyn Signer>,
     pub rate_limiter: Arc<TokenBucket>,
     pub http: reqwest::Client,
+    /// PR-C1: pre-built symbol → asset cache. `RealHlClient::bootstrap()`
+    /// initializes this empty so `fetch_meta()` can be called to BUILD the
+    /// cache; `with_meta()` upgrades it. After `with_meta`, this is the
+    /// authoritative source for asset resolution in place/cancel.
+    pub meta: Arc<crate::meta::MetaCache>,
 }
 
 impl RealHlClient {
-    pub fn new(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
+    /// Construct a client with an EMPTY MetaCache. Use this when you need
+    /// to call `fetch_meta()` to build the real cache; afterward, call
+    /// `with_meta()` to produce a production-ready client.
+    pub fn bootstrap(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
         let http = reqwest::Client::builder()
             .pool_idle_timeout(Some(std::time::Duration::from_secs(60)))
             .timeout(std::time::Duration::from_secs(10))
@@ -389,7 +397,35 @@ impl RealHlClient {
             signer,
             rate_limiter: Arc::new(TokenBucket::hyperliquid_default()),
             http,
+            meta: Arc::new(crate::meta::MetaCache::empty()),
         }
+    }
+
+    /// Replace the MetaCache. Returns a new `RealHlClient` reusing the
+    /// existing http/signer/rate_limiter. Call this after building the cache.
+    pub fn with_meta(self, meta: Arc<crate::meta::MetaCache>) -> Self {
+        Self { meta, ..self }
+    }
+
+    /// Backwards-compatible alias. Existing callers used `new(config, signer)`
+    /// with the implicit assumption that meta would be filled in later.
+    /// New code should use `bootstrap` + `with_meta` explicitly.
+    pub fn new(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
+        Self::bootstrap(config, signer)
+    }
+
+    /// Resolve a symbol to its asset index using the cached meta.
+    /// Used by both `place_orders` and `cancel_orders` (Task 6).
+    ///
+    /// `allow(dead_code)`: introduced in PR-C1 Task 4. Wired into
+    /// `place_orders` / `cancel_orders` in Task 6 once `OrderIntent.asset`
+    /// is removed (Task 5).
+    #[allow(dead_code)]
+    pub(crate) fn resolve_asset(
+        &self,
+        symbol: &executor_core::symbol::Symbol,
+    ) -> Result<u32, HlError> {
+        self.meta.resolve(symbol)
     }
 
     /// POST a JSON body to the /info endpoint and return the response body as a String.
