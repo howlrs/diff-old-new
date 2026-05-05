@@ -503,7 +503,7 @@ impl HlClient for RealHlClient {
             .map(|d| d.as_millis() as u64)
             .unwrap_or_default();
         let action = serde_json::json!({"type": "order", "orders": orders.len()});
-        let _sig = self.signer.sign_l1(&action, nonce).await?;
+        let _sig = self.signer.sign_l1(&action, nonce, None).await?;
 
         Err(HlError::Exchange {
             code: Some("not_implemented".into()),
