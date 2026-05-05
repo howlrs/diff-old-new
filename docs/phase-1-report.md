@@ -5,6 +5,12 @@ Tag: `v0.1.0`
 
 > **追記 (2026-05-04)**: Phase 3 の中で **Rust executor 80% プロトタイプ** が完了 (PR-1〜PR-8).
 > 詳細は [`executor/`](executor/README.md) を参照. 鍵管理 + 実 HL POST のみ未実装.
+>
+> **追記 (2026-05-06, v0.5.0)**: Phase 2〜4 完成 + mainnet passive_follow build 完遂.
+> Hyperliquid mainnet で ETH 0.115 → 0.200 (+0.085, 17 round) を ALO maker のみで連続約定.
+> 詳細は [`RELEASE-NOTES-v0.5.0.md`](RELEASE-NOTES-v0.5.0.md) と
+> [`HANDOFF-2026-05-06-v0.5.0.md`](HANDOFF-2026-05-06-v0.5.0.md) を参照.
+> Phase 1 当時の本文 (以下) は当時の達成記録としてそのまま保持する.
 
 ## ビジョン (再掲)
 オールド金融 (CME/NYSE/NASDAQ) と新金融 (Hyperliquid HIP-3 / Trade[XYZ]) の **構造的接続点と切断点** を観測し、繰り返し可能な統計的優位 (LLN/CLT) を発見・収益化する.

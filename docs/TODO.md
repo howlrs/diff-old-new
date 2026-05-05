@@ -1,46 +1,38 @@
-# TODO (Phase 3.5 以降)
+# TODO (Phase 4 後 / v0.5.0 以降)
 
-最終更新: 2026-05-04 (PR-1 〜 PR-8 + docs PR-66 完了時点)
-詳細な引き継ぎ: [`HANDOFF-2026-05-04.md`](HANDOFF-2026-05-04.md)
+最終更新: 2026-05-06 (v0.5.0 タグ付け時点)
+リリースノート: [`RELEASE-NOTES-v0.5.0.md`](RELEASE-NOTES-v0.5.0.md)
+最新引き継ぎ: [`HANDOFF-2026-05-06-v0.5.0.md`](HANDOFF-2026-05-06-v0.5.0.md)
 
-## 必須 (本番投入の前提)
+## v0.5.0 で完了した過去 TODO (記念碑)
 
-- [ ] **A. 鍵管理ブレスト** ⭐ 最優先  
-      検討: 鍵保持場所 / agent wallet 構造 / deregister 手順 / メモリ衛生 / rotation policy  
-      → `docs/specs/2026-05-MM-key-management-design.md` を起こす  
-      Gemini deep レビュー必須
+Phase 3.5 で必須としていた A 〜 F は全て完了済。
 
-- [ ] **B. `Eip712AgentSigner` 実装** (`executor-hl/src/signer.rs`)  
-      - HL `/exchange` の typed-data 構造 (HL python-sdk 0.23.0 がリファレンス)  
-      - `secrecy::Secret<...>` で秘密鍵保持  
-      - 単体テスト: 既知 nonce + msg → 既知 signature (HL python-sdk と cross-check)
+- [x] **A. 鍵管理ブレスト** — `~/.password-store/diff-old-new/hl/agent-pk.gpg` GPG 暗号化保管 + `scripts/load-env.sh` + project CLAUDE.md + PreToolUse hook (PR #68)
+- [x] **B. `Eip712AgentSigner`** — alloy 2.0.4 + sol! Agent + msgpack、HL python-sdk と byte-identical 10/10 (PR-B1)
+- [x] **C. `RealHlClient::place_orders` / `cancel_orders`** — mockito 9 tests + mainnet 1-round-trip 実機実証 (PR-B2a / PR-B2b)
+- [x] **D. Real WS subscriber** — `tokio-tungstenite` + 指数バックオフ + 5min reconcile (PR-D1, master_address fix は PR-D2)
+- [x] **E. Auth レイヤ** — `X-Operator-ID` header + Python connector 対応 (PR-C4)
+- [x] **F. testnet smoke** — multi-symbol testnet live + Python e2e CI (PR-C4)
 
-- [ ] **C. `RealHlClient::place_orders` / `cancel_orders` 完成** (`executor-hl/src/hl_client.rs`)  
-      - POST /exchange の payload schema 確定  
-      - レスポンス JSON parse (oid 抽出, error mapping)  
-      - rate-limited 時の `HlError::RateLimited { wait_ms }`
+## 必須 (PR-D9 候補 — v0.5.0 既知の限界の解消)
 
-- [ ] **D. Real WS subscriber** (`executor-hl/src/ws_state.rs` の上に新規ファイル想定)  
-      - `tokio-tungstenite` で `wss://api.hyperliquid.xyz/ws`  
-      - 切断検知 + 指数バックオフ (200ms→30s, 30s 安定で reset)  
-      - 起動時 + 再接続後 + 5min 周期で `clearinghouseState` reconcile
+- [ ] **D9-1. WS `webData2` channel subscribe**
+      `state.position` を 5min reconcile を待たずに即時更新したい。Gemini deep の推奨は webData2 + isSnapshot filter で、起動直後の snapshot frame が過去 fills を二重加算する PR-D4 の轍を踏まないこと。
+      影響: 観測性 / build script の delta polling 簡易化
 
-- [ ] **E. Auth レイヤ (前段 reverse proxy)**  
-      - mTLS or SSO/JWT  
-      - proxy で `X-Operator-ID` 自動付与  
-      - executor-server を public に晒さない方針を運用 doc 化
+- [ ] **D9-2. `ExecutionRegistry::list()` の running 限定**
+      現状 `list()` は completed entry も返すため `running_executions` 数値が履歴累積になる。Python 側で prev_exec の terminal check で運用回避しているが、サーバ側で `status: Running` だけ返すか別 endpoint を切り出すのが本筋。
+      影響: 運用回避済 (実害低)、API の自然さ
 
-- [ ] **F. testnet smoke** (Phase 3.5 完成判定)  
-      - MARKET / PASSIVE / TWAP / MM 各 1 ラウンド  
-      - `POST /v1/emergency_stop` の testnet 実走
+- [ ] **D9-3. HTTP 429 を `HlError::RateLimited` に分類**
+      `post_info` / `post_exchange` で HTTP 429 を network error として扱っている。内部 token bucket で予防しているため v0.5.0 中は 0 hit だが、将来 burst が出たときに正しく backoff したい。
+      影響: 本番運用の robustness
 
-## 推奨 (Phase 3.5 と並行可)
-
-- [ ] **3.1 Python connector の `X-Operator-ID` サポート**  
-      `src/executor/client.py` の `ExecutorClient` に `operator_id` パラメータ追加 (PR-8 deferred)
+## 推奨 (Phase 3.5 から繰り越し、優先度低)
 
 - [ ] **3.2 ExecutionRegistry の TTL/prune** (PR-7 review)  
-      `executor-server/src/registry.rs` に `prune_completed(older_than)` 追加
+      `executor-server/src/registry.rs` に `prune_completed(older_than)` 追加 (D9-2 で同時に解決可能)
 
 - [ ] **3.3 broadcast 容量を増やす** (PR-7 review)  
       `executor-server/src/routes.rs:103` の `broadcast::channel(256)` を 1024 等へ
@@ -49,12 +41,10 @@
       `src/executor/client.py` の `stream()` に再接続ループ追加
 
 - [ ] **3.5 `tick_size` per symbol meta** (PR-4 deferred)  
-      `executor-core/src/symbol.rs` に tick_size を持たせて  
-      `passive_follow.rs` の `repost_threshold_ticks` を有効化
+      `executor-core/src/symbol.rs` に tick_size を持たせて `passive_follow.rs` の `repost_threshold_ticks` を有効化
 
 - [ ] **3.6 MARKET_MAKE の `all_fills` rotation** (PR-6 known limitation)  
-      案 A: server 側で execution を ~1h ごとに自動 rotate  
-      案 B: `all_fills` を bounded ring buffer 化
+      案 A: server 側で execution を ~1h ごとに自動 rotate / 案 B: `all_fills` を bounded ring buffer 化
 
 ## 任意 (応用)
 
@@ -75,8 +65,10 @@
 - [ ] **3.11 MARKET の dynamic slippage**  
       直近 fill 結果から slippage を学習
 
-## 完了済み (この履歴)
+## 完了済み (履歴)
 
-- [x] PR-1〜PR-8: Rust executor 80% プロトタイプ (`executor/`)
+- [x] PR-1〜PR-8: Rust executor 80% プロトタイプ (`executor/`, ~v0.4.x)
 - [x] PR-66: `docs/executor/` 日本語ドキュメント整備
-- [x] HANDOFF-2026-05-04.md: 本ファイル + 引き継ぎメモ
+- [x] HANDOFF-2026-05-04.md / HANDOFF-2026-05-05.md / HANDOFF-2026-05-05-PR-D1-POSTMORTEM.md
+- [x] PR-A 〜 PR-D8: Phase 2〜4 統合 (v0.5.0)
+- [x] mainnet passive_follow build 0.115 → 0.200 ETH 実証 (2026-05-06, 17/17 約定成功)
