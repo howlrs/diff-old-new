@@ -28,7 +28,13 @@ if [[ -d .venv ]]; then
 
     echo ""
     echo "[python 4/4] Pytest (CI と同じ marker filter)..."
-    .venv/bin/pytest -q -m "not live and not slow" --cov=src --cov-report=term-missing | tail -5
+    # PR-C4 (2026-05-05): e2e tests need executor-server release binary. Build it
+    # before pytest so the function-scoped `running_server` fixture can spawn it.
+    if [[ -d executor && -f executor/Cargo.toml ]]; then
+        echo "    -> building executor-server release for e2e tests..."
+        (cd executor && cargo build --release -p executor-server 2>&1 | tail -3)
+    fi
+    .venv/bin/pytest -q -m "not live" --cov=src --cov-report=term-missing | tail -5
 else
     echo "[python] .venv not found, skipping (run: python3.12 -m venv .venv && pip install -e '.[dev,all]')"
 fi

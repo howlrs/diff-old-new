@@ -1,14 +1,19 @@
 """End-to-end smoke test: spins up the Rust executor-server and drives it
 via the Python connector.
 
-This test is marked ``slow`` and ``live`` so CI skips it by default
-(CI runs ``pytest -m "not live and not slow"``). Run locally with::
+PR-C4 (2026-05-05): the mock-mode e2e path is now safe enough for CI —
+it never touches HL, just exercises the Python ↔ Rust round-trip. Tests
+keep the ``slow`` marker so a developer can opt out via
+``pytest -m "not slow"`` if they only care about contract tests.
 
-    cargo build -p executor-server --release
-    pytest tests/test_executor_client_live.py -m live
+CI runs ``pytest -m "not live"`` and builds ``executor-server --release``
+beforehand. The ``live`` marker remains reserved for tests that hit real
+HL endpoints.
 
 The fixture finds a free port, starts the server, waits for /v1/health to
-come up, runs the test, and tears the server down on exit.
+come up, runs the test, and tears the server down on exit. PR-C3 made
+``emergency_stop`` mutate global server state (``shutdown_initiated``),
+so the fixture is **function-scoped** — every test gets a fresh server.
 """
 
 from __future__ import annotations
@@ -50,9 +55,13 @@ def _server_binary() -> Path:
     )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def running_server() -> Iterator[str]:
-    """Start the executor-server, yield its base URL, tear it down."""
+    """Start the executor-server, yield its base URL, tear it down.
+
+    Function-scoped because PR-C3 makes emergency_stop mutate global state
+    (``ServerState::shutdown_initiated``). A module-scoped fixture would
+    leak that state between tests."""
     try:
         binary = _server_binary()
     except FileNotFoundError as e:
@@ -89,7 +98,6 @@ def running_server() -> Iterator[str]:
             proc.kill()
 
 
-@pytest.mark.live
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_e2e_health_and_algorithms(running_server: str) -> None:
@@ -100,7 +108,6 @@ async def test_e2e_health_and_algorithms(running_server: str) -> None:
         assert n in body["algorithms"]
 
 
-@pytest.mark.live
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_e2e_unknown_algorithm_400(running_server: str) -> None:
@@ -114,7 +121,6 @@ async def test_e2e_unknown_algorithm_400(running_server: str) -> None:
             )
 
 
-@pytest.mark.live
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_e2e_emergency_stop_with_no_running(running_server: str) -> None:
@@ -124,7 +130,6 @@ async def test_e2e_emergency_stop_with_no_running(running_server: str) -> None:
     assert body["cancelled_orders"] == 0
 
 
-@pytest.mark.live
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_e2e_market_book_returns_404(running_server: str) -> None:
@@ -133,7 +138,6 @@ async def test_e2e_market_book_returns_404(running_server: str) -> None:
             await cli.book("BTC")
 
 
-@pytest.mark.live
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_e2e_start_market_then_cancel(running_server: str) -> None:
@@ -164,3 +168,48 @@ async def _sleep(seconds: float) -> None:
     import asyncio
 
     await asyncio.sleep(seconds)
+
+
+# ---- PR-C4: Python e2e for PR-C3 features (operator_id audit, idempotent
+#      emergency_stop, 503 after stop) ----
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_e2e_emergency_stop_with_operator_id(running_server: str) -> None:
+    """operator_id passes through Python connector → server audit log.
+    The server doesn't echo it, so this just verifies the code path doesn't
+    blow up on either side."""
+    async with ExecutorClient(running_server, operator_id="alice@desk") as cli:
+        body = await cli.emergency_stop()
+    assert body["aborted_executions"] == 0
+    assert body["cancelled_orders"] == 0
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_e2e_idempotent_emergency_stop(running_server: str) -> None:
+    """PR-C3: a second emergency_stop call after the first must be a no-op."""
+    async with ExecutorClient(running_server) as cli:
+        first = await cli.emergency_stop()
+        second = await cli.emergency_stop()
+    # First call may or may not have running executions to abort (typically 0
+    # in this fixture, but accept anything ≥ 0). Second must be (0, 0).
+    assert first["aborted_executions"] >= 0
+    assert second["aborted_executions"] == 0
+    assert second["cancelled_orders"] == 0
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_e2e_503_after_emergency_stop(running_server: str) -> None:
+    """PR-C3: start_exec must return 503 once emergency_stop has fired."""
+    async with ExecutorClient(running_server) as cli:
+        await cli.emergency_stop()
+        with pytest.raises(Exception, match="HTTP 503"):
+            await cli.start(
+                algorithm=Algorithm.MARKET,
+                symbol="BTC",
+                intent=Intent.OPEN,
+                target_size="0.001",
+            )
