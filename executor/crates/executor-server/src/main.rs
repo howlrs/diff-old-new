@@ -184,6 +184,45 @@ async fn main() -> anyhow::Result<()> {
                 Eip712AgentSigner::from_secret(SecretString::new(pk.into()), is_mainnet)
                     .context("Eip712AgentSigner::from_secret failed")?,
             );
+
+            // PR-D1+ hotfix: verify the PK actually corresponds to the agent
+            // address declared in the environment. If they disagree, every
+            // place_orders call will hit HL with a signature ecrecover'd to
+            // an address HL doesn't know about ("User or API Wallet ... does
+            // not exist"). EIP-712 signatures don't error on mismatch; they
+            // just resolve to an arbitrary address. Catch this at startup.
+            let pk_derived = signer.address();
+            tracing::info!(agent_pk_derived = %pk_derived, "agent address derived from HL_AGENT_PK");
+            match std::env::var("HL_AGENT_ADDRESS") {
+                Ok(declared) => {
+                    let declared_norm = declared.trim().to_ascii_lowercase();
+                    let derived_norm = pk_derived.as_str().to_ascii_lowercase();
+                    if declared_norm != derived_norm {
+                        anyhow::bail!(
+                            "agent address mismatch: HL_AGENT_PK derives `{derived_norm}` \
+                             but HL_AGENT_ADDRESS env says `{declared_norm}`. \
+                             The signature would ecrecover to a wallet HL doesn't recognize, \
+                             producing 'User or API Wallet does not exist' errors. \
+                             Either rotate HL_AGENT_PK to the correct key or update \
+                             HL_AGENT_ADDRESS / .env.develop to the address derived from the key. \
+                             Tip: HL UI > API page shows authorized agent wallets for the master."
+                        );
+                    }
+                    tracing::info!(
+                        agent = %declared_norm,
+                        "agent address mismatch check passed (PK ↔ HL_AGENT_ADDRESS)"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        agent_pk_derived = %pk_derived,
+                        "HL_AGENT_ADDRESS env not set — skipping PK↔address consistency check. \
+                         Set HL_AGENT_ADDRESS in .env.develop so startup can fail-fast on \
+                         key/address drift."
+                    );
+                }
+            }
+
             let bootstrap = RealHlClient::bootstrap(config, signer.clone());
             let meta = Arc::new(
                 MetaCache::build(&bootstrap, &[None])
@@ -191,6 +230,62 @@ async fn main() -> anyhow::Result<()> {
                     .context("MetaCache::build (default dex) failed at startup")?,
             );
             tracing::info!(symbols = meta.len(), "MetaCache built (default dex)");
+
+            // PR-D1+ hotfix: probe HL `userRole` to confirm the agent is
+            // registered. HL refuses signed actions from unregistered keys
+            // with "top_level_err: User or API Wallet ... does not exist."
+            // Catching that at startup beats waiting for the first order to
+            // explode at runtime.
+            match bootstrap.fetch_user_role(&pk_derived).await {
+                Ok(role) => {
+                    use executor_hl::Role;
+                    match &role {
+                        Role::Agent { master } => {
+                            tracing::info!(
+                                agent = %pk_derived,
+                                role_master = %master,
+                                "HL userRole probe: agent registered, ready"
+                            );
+                            // If the operator passed --master-address, sanity-check it.
+                            if let Some(declared_master) = args.master_address.as_deref() {
+                                let declared = declared_master.trim().to_ascii_lowercase();
+                                let role_master = master.as_str().to_ascii_lowercase();
+                                if declared != role_master {
+                                    anyhow::bail!(
+                                        "master address mismatch: --master-address = `{declared}` \
+                                         but HL says agent `{}` belongs to master `{role_master}`. \
+                                         BaselineGuard would monitor the wrong account.",
+                                        pk_derived
+                                    );
+                                }
+                            }
+                        }
+                        other => {
+                            tracing::error!(
+                                agent = %pk_derived,
+                                ?other,
+                                "HL userRole probe: agent is NOT registered as an Agent. \
+                                 Place_orders will fail with 'User or API Wallet does not exist'."
+                            );
+                            anyhow::bail!(
+                                "agent {} is not registered with HL as an Agent (role={:?}). \
+                                 Authorize this address as an API wallet on the master \
+                                 account first, or rotate HL_AGENT_PK to a registered agent.",
+                                pk_derived,
+                                other
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %pk_derived,
+                        error = %e,
+                        "HL userRole probe failed (network/info issue); proceeding without registration check"
+                    );
+                }
+            }
+
             let real_client = Arc::new(bootstrap.with_meta(meta));
             let gate_dyn: Arc<dyn IntentChecker> = safety.clone();
             let (batch_sender, batch_handle) =

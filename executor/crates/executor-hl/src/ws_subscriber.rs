@@ -4,8 +4,9 @@
 //! the background. The supervisor:
 //!
 //! 1. Connects to the HL WebSocket endpoint.
-//! 2. Sends `subscribe` frames for `userFills`, `orderUpdates` (per agent),
-//!    and `l2Book` (per allow-listed symbol).
+//! 2. Sends `subscribe` frames for `userFills`, `orderUpdates` (per master EOA
+//!    — HL returns empty results when subscribed with the agent address), and
+//!    `l2Book` (per allow-listed symbol).
 //! 3. On every successful (re)connection, performs a one-shot REST snapshot
 //!    of `open_orders` and `account_state` so that any events that fired
 //!    during the disconnect are reconciled.
@@ -55,11 +56,13 @@ use crate::ws_state::WsStateManager;
 pub struct WsSubscriberConfig {
     /// `wss://api.hyperliquid.xyz/ws` (mainnet) or testnet equivalent.
     pub url: String,
-    /// Agent wallet address. Used as the `user` field on userFills/orderUpdates
-    /// subscribes — HL routes events to the **agent**, not the master.
+    /// Agent wallet address. Kept on the config for diagnostics / future use;
+    /// **not** used as the `user` field on subscribes (see master_address).
     pub agent_address: Address,
-    /// Master EOA. Used by reconcile (`fetch_open_orders` / `fetch_account_state`)
-    /// — HL stores positions & open orders against the master.
+    /// Master EOA. Used as the `user` field on userFills/orderUpdates and by
+    /// reconcile (`fetch_open_orders` / `fetch_account_state`). HL returns
+    /// empty results if you subscribe with the agent address when the master
+    /// is the one holding positions.
     pub master_address: Address,
     /// l2Book symbols to subscribe. Typically taken from the allow-list.
     pub symbols: Vec<Symbol>,
@@ -219,9 +222,10 @@ async fn connect_and_run(
         .map_err(|e| HlError::Network(format!("ws connect: {e}")))?;
     tracing::info!("ws_subscriber: connected, sending subscribe frames");
 
-    // userFills + orderUpdates (per agent)
-    send_subscribe_user_fills(&mut ws, &cfg.agent_address).await?;
-    send_subscribe_order_updates(&mut ws, &cfg.agent_address).await?;
+    // userFills + orderUpdates (per master, per HL spec — agent-as-user
+    // returns empty results when an agent wallet places orders for a master).
+    send_subscribe_user_fills(&mut ws, &cfg.master_address).await?;
+    send_subscribe_order_updates(&mut ws, &cfg.master_address).await?;
     for sym in &cfg.symbols {
         send_subscribe_l2_book(&mut ws, sym).await?;
     }
@@ -312,7 +316,7 @@ async fn run_connection(
                         > cfg.stale_after.as_millis() as u64,
                 };
                 if stale {
-                    match poll_user_fills_fallback(rest_client, manager, &cfg.agent_address, status).await {
+                    match poll_user_fills_fallback(rest_client, manager, &cfg.master_address, status).await {
                         Ok(_) => {
                             rest_backoff = cfg.rest_poll_interval;
                         }
@@ -396,17 +400,18 @@ async fn handle_ws_message(
 
 /// REST polling fallback for `userFills`. Bounded by the high-water timestamp
 /// in `status.last_seen_fill_ts_ms` so we don't ask HL for the entire history.
+/// Uses the master EOA — HL returns empty results when queried with an agent.
 async fn poll_user_fills_fallback(
     rest_client: &Arc<dyn HlClient>,
     manager: &Arc<WsStateManager>,
-    agent: &Address,
+    master: &Address,
     status: &Arc<WsStatus>,
 ) -> Result<usize, HlError> {
     let prev_high = status.last_seen_fill_ts_ms.load(Ordering::Acquire);
     // start_ms = last seen + 1 (or 0 on first ever poll)
     let start_ms = prev_high.saturating_add(1).max(1);
     let fills = rest_client
-        .fetch_user_fills_by_time(agent, start_ms, None)
+        .fetch_user_fills_by_time(master, start_ms, None)
         .await?;
     let mut applied = 0usize;
     let mut new_high = prev_high;
@@ -450,33 +455,50 @@ async fn reconcile_once(
 }
 
 // ---- subscribe-frame helpers ----
+//
+// Frame construction is split out as pure functions so a unit test can
+// regression-check the contract that broke PR-D1: HL returns empty results
+// when `userFills` / `orderUpdates` are subscribed with the agent address
+// instead of the master EOA. See `tests::user_fills_frame_uses_master`.
 
-async fn send_subscribe_user_fills(ws: &mut WsStream, agent: &Address) -> Result<(), HlError> {
-    let frame = serde_json::json!({
+fn build_user_fills_frame(user: &Address) -> String {
+    serde_json::json!({
         "method": "subscribe",
-        "subscription": { "type": "userFills", "user": agent.as_str() }
-    });
-    ws.send(Message::Text(frame.to_string().into()))
+        "subscription": { "type": "userFills", "user": user.as_str() }
+    })
+    .to_string()
+}
+
+fn build_order_updates_frame(user: &Address) -> String {
+    serde_json::json!({
+        "method": "subscribe",
+        "subscription": { "type": "orderUpdates", "user": user.as_str() }
+    })
+    .to_string()
+}
+
+fn build_l2_book_frame(sym: &Symbol) -> String {
+    serde_json::json!({
+        "method": "subscribe",
+        "subscription": { "type": "l2Book", "coin": sym.as_str() }
+    })
+    .to_string()
+}
+
+async fn send_subscribe_user_fills(ws: &mut WsStream, user: &Address) -> Result<(), HlError> {
+    ws.send(Message::Text(build_user_fills_frame(user).into()))
         .await
         .map_err(|e| HlError::Network(format!("ws send userFills sub: {e}")))
 }
 
-async fn send_subscribe_order_updates(ws: &mut WsStream, agent: &Address) -> Result<(), HlError> {
-    let frame = serde_json::json!({
-        "method": "subscribe",
-        "subscription": { "type": "orderUpdates", "user": agent.as_str() }
-    });
-    ws.send(Message::Text(frame.to_string().into()))
+async fn send_subscribe_order_updates(ws: &mut WsStream, user: &Address) -> Result<(), HlError> {
+    ws.send(Message::Text(build_order_updates_frame(user).into()))
         .await
         .map_err(|e| HlError::Network(format!("ws send orderUpdates sub: {e}")))
 }
 
 async fn send_subscribe_l2_book(ws: &mut WsStream, sym: &Symbol) -> Result<(), HlError> {
-    let frame = serde_json::json!({
-        "method": "subscribe",
-        "subscription": { "type": "l2Book", "coin": sym.as_str() }
-    });
-    ws.send(Message::Text(frame.to_string().into()))
+    ws.send(Message::Text(build_l2_book_frame(sym).into()))
         .await
         .map_err(|e| HlError::Network(format!("ws send l2Book sub: {e}")))
 }
@@ -503,5 +525,83 @@ mod tests {
         let s = WsStatus::disabled();
         assert!(!s.connected.load(Ordering::Acquire));
         assert_eq!(s.message_count.load(Ordering::Acquire), 0);
+    }
+
+    /// Regression for the PR-D1 mainnet smoke bug (2026-05-05): subscribing
+    /// `userFills` with the agent address returned empty results from HL,
+    /// hiding all fills from the algo. The frame builder must serialise the
+    /// address it was given verbatim — the call site is responsible for
+    /// passing the master EOA, but if a future refactor flips the argument
+    /// back to the agent this test stays mute. Pair this with the call-site
+    /// regression below.
+    #[test]
+    fn user_fills_frame_serialises_user_field_verbatim() {
+        let master = Address::new("0xfe3e32cd4443e395ec0400bf828a34309e517d2d");
+        let frame = build_user_fills_frame(&master);
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["method"], "subscribe");
+        assert_eq!(v["subscription"]["type"], "userFills");
+        assert_eq!(
+            v["subscription"]["user"],
+            "0xfe3e32cd4443e395ec0400bf828a34309e517d2d"
+        );
+    }
+
+    #[test]
+    fn order_updates_frame_serialises_user_field_verbatim() {
+        let master = Address::new("0xfe3e32cd4443e395ec0400bf828a34309e517d2d");
+        let frame = build_order_updates_frame(&master);
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["method"], "subscribe");
+        assert_eq!(v["subscription"]["type"], "orderUpdates");
+        assert_eq!(
+            v["subscription"]["user"],
+            "0xfe3e32cd4443e395ec0400bf828a34309e517d2d"
+        );
+    }
+
+    #[test]
+    fn l2_book_frame_serialises_coin_field_verbatim() {
+        let frame = build_l2_book_frame(&Symbol::new("ETH"));
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["method"], "subscribe");
+        assert_eq!(v["subscription"]["type"], "l2Book");
+        assert_eq!(v["subscription"]["coin"], "ETH");
+    }
+
+    /// Source-text regression: the call site in `connect_and_run` must use
+    /// `cfg.master_address`, not `cfg.agent_address`. If a future refactor
+    /// reverts the fix, this catches it without needing a live HL connection.
+    /// The test only inspects `connect_and_run`'s body to avoid matching
+    /// itself or unrelated documentation that mentions `agent_address`.
+    #[test]
+    fn connect_and_run_subscribes_with_master_address() {
+        let src = include_str!("ws_subscriber.rs");
+        let body_start = src
+            .find("async fn connect_and_run(")
+            .expect("connect_and_run signature missing");
+        let body_end = src[body_start..]
+            .find("async fn run_connection(")
+            .map(|off| body_start + off)
+            .expect("run_connection follows connect_and_run; signature missing");
+        let body = &src[body_start..body_end];
+        assert!(
+            body.contains("send_subscribe_user_fills(&mut ws, &cfg.master_address)"),
+            "userFills must subscribe with master_address (HL spec)"
+        );
+        assert!(
+            body.contains("send_subscribe_order_updates(&mut ws, &cfg.master_address)"),
+            "orderUpdates must subscribe with master_address (HL spec)"
+        );
+        let bug_userfills = "send_subscribe_user_fills(&mut ws, &cfg.agent_address)";
+        let bug_orderupdates = "send_subscribe_order_updates(&mut ws, &cfg.agent_address)";
+        assert!(
+            !body.contains(bug_userfills),
+            "regression: userFills must not subscribe with agent_address (see PR-D1 postmortem)"
+        );
+        assert!(
+            !body.contains(bug_orderupdates),
+            "regression: orderUpdates must not subscribe with agent_address (see PR-D1 postmortem)"
+        );
     }
 }
