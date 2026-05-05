@@ -79,6 +79,21 @@ pub struct ScheduleCancelAction {
     pub time: Option<u64>,
 }
 
+/// `{"type": "cancelByCloid", "cancels": [{asset, cloid}, ...]}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelByCloidAction {
+    #[serde(rename = "type")]
+    pub action_type: String,
+    pub cancels: Vec<CancelByCloidWire>,
+}
+
+/// One cancel wire item. Field order: asset (full word, NOT `a`), cloid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelByCloidWire {
+    pub asset: u32,
+    pub cloid: String,
+}
+
 // === EIP-712 typed-data ===
 
 sol! {
@@ -210,5 +225,28 @@ mod tests {
         let t = build_agent(h, false);
         assert_eq!(m.source, "a");
         assert_eq!(t.source, "b");
+    }
+
+    /// `pack_action(&CancelByCloidAction{...})` must serialize as a msgpack
+    /// MAP (not array), with `type`/`cancels` keys at the top and per-cancel
+    /// `asset`/`cloid` keys nested. Sanity check only — full byte match isn't
+    /// required because the cross-check fixture covers signing end-to-end via
+    /// dispatch_and_hash.
+    #[test]
+    fn cancel_by_cloid_action_msgpack_starts_with_map_marker() {
+        let action = CancelByCloidAction {
+            action_type: "cancelByCloid".into(),
+            cancels: vec![CancelByCloidWire {
+                asset: 1,
+                cloid: "0x00000000000000000000000000000001".into(),
+            }],
+        };
+        let bytes = pack_action(&action).unwrap();
+        // 0x82 = fix-map(2) — top-level has "type" + "cancels"
+        assert_eq!(
+            bytes[0], 0x82,
+            "expected fix-map(2), got 0x{:02x}",
+            bytes[0]
+        );
     }
 }

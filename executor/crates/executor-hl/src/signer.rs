@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::HlError;
 
 use crate::eip712::{action_hash, build_agent, l1_domain};
-use crate::eip712::{DummyAction, OrderAction, ScheduleCancelAction};
+use crate::eip712::{CancelByCloidAction, DummyAction, OrderAction, ScheduleCancelAction};
 use alloy::primitives::Address as AlloyAddress;
 use alloy::signers::SignerSync;
 use alloy::sol_types::SolStruct;
@@ -200,6 +200,12 @@ fn dispatch_and_hash(
                 .map_err(|e| HlError::ActionFormat(format!("scheduleCancel decode: {e}")))?;
             action_hash(&typed, nonce, vault, None)
                 .map_err(|e| HlError::ActionFormat(format!("scheduleCancel msgpack: {e}")))
+        }
+        "cancelByCloid" => {
+            let typed = CancelByCloidAction::deserialize(action)
+                .map_err(|e| HlError::ActionFormat(format!("cancelByCloid decode: {e}")))?;
+            action_hash(&typed, nonce, vault, None)
+                .map_err(|e| HlError::ActionFormat(format!("cancelByCloid msgpack: {e}")))
         }
         other => Err(HlError::ActionFormat(format!(
             "unsupported action type for Eip712AgentSigner: {other}"
