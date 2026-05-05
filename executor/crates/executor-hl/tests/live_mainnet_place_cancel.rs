@@ -33,17 +33,20 @@ use secrecy::SecretString;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// HL enforces a minimum order notional of $10. We pick 0.005 ETH so that at
-/// $2000-$3000/ETH the notional sits comfortably above $10 (~$11-$15) and well
-/// under MAX_NOTIONAL_USD. With 10x leverage this is ~$1.5 margin — trivial
-/// against the master EOA's withdrawable balance.
-const MAX_NOTIONAL_USD: Decimal = dec!(20);
+/// HL enforces a minimum order notional of $10. We target ~$15 by computing
+/// size dynamically from the live ETH price, so the test stays correct
+/// regardless of where ETH trades (the previous fixed `0.005` would Fail
+/// outside the $2000-$4000 ETH range).
+const TARGET_NOTIONAL_USD: Decimal = dec!(15);
+const MAX_NOTIONAL_USD: Decimal = dec!(50);
 const MIN_NOTIONAL_USD: Decimal = dec!(10);
-const ORDER_SZ_ETH: Decimal = dec!(0.005);
+/// Sanity bounds for the observed tick. ETH typical tick is $0.1; if the book
+/// L1-L2 gap is wildly outside this range the book is too thin to use as a
+/// tick proxy and we fail loudly instead of silently sending a malformed price.
+const MIN_OBSERVED_TICK_USD: Decimal = dec!(0.05);
+const MAX_OBSERVED_TICK_USD: Decimal = dec!(0.5);
 /// Number of ticks below best_bid to place the ALO post-only order.
-/// HL ETH typical tick = $0.1 → 100 ticks = $10 (~0.4% below best_bid),
-/// well below cross threshold while staying inside HL's 5-sig-fig + szDecimals
-/// price-formatting constraints (we use the bid grid which is HL-valid by construction).
+/// 100 ticks at typical $0.1 tick = ~$10 below (~0.4% safety distance).
 const TICKS_BELOW_BID: usize = 100;
 const POST_PLACE_WAIT_MS: u64 = 200;
 
@@ -105,11 +108,12 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
     // === best price + tick-based offset ===
     //
     // HL price formatting requires (a) max 5 significant figures, (b) max
-    // (6 - szDecimals) decimal places. Computing `best_bid * 0.99` typically
-    // produces too many sig figs (e.g. 2384.7 * 0.99 = 2360.853). To stay
-    // HL-valid by construction, we observe the actual tick from the bid grid
-    // (level[0].px - level[1].px) and step `TICKS_BELOW_BID` ticks down from
-    // best_bid — that price is always on HL's grid.
+    // (6 - szDecimals) decimal places. `best_bid * 0.99` typically produces
+    // too many sig figs (e.g. 2384.7 * 0.99 = 2360.853). To stay HL-valid by
+    // construction, we observe the tick from the bid grid (level[0].px -
+    // level[1].px) and step `TICKS_BELOW_BID` ticks down — that price is
+    // always on HL's grid. We also bound the observed tick: a thin book where
+    // the L1-L2 gap is far from typical is rejected via assert.
     let book = client
         .fetch_book_snapshot(&Symbol::new("ETH"))
         .await
@@ -117,22 +121,36 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
     let best_bid = book.best_bid().expect("ETH bid present");
     assert!(
         book.bids.len() >= 2,
-        "need at least 2 bid levels to derive tick"
+        "need at least 2 bid levels to derive tick (got {} levels)",
+        book.bids.len()
     );
     let tick = book.bids[0].px - book.bids[1].px;
     assert!(
-        tick > Decimal::ZERO,
-        "tick must be positive: bids[0]={}, bids[1]={}",
+        tick >= MIN_OBSERVED_TICK_USD && tick <= MAX_OBSERVED_TICK_USD,
+        "observed tick ${} outside sanity range [${}, ${}] — book may be thin/abnormal: \
+         bids[0]={} bids[1]={}",
+        tick,
+        MIN_OBSERVED_TICK_USD,
+        MAX_OBSERVED_TICK_USD,
         book.bids[0].px,
         book.bids[1].px
     );
     let order_px = best_bid - tick * Decimal::from(TICKS_BELOW_BID);
-    let notional = order_px * ORDER_SZ_ETH;
+
+    // Compute size dynamically from current price so notional ≈ TARGET regardless
+    // of where ETH trades. ETH szDecimals=4 (verified via meta) so we round
+    // to 4 decimals. truncating ToZero ensures we stay below the target rather
+    // than overshooting.
+    let raw_sz = TARGET_NOTIONAL_USD / order_px;
+    let order_sz = raw_sz.round_dp_with_strategy(4, rust_decimal::RoundingStrategy::ToZero);
+    let notional = order_px * order_sz;
     assert!(
         notional >= MIN_NOTIONAL_USD,
-        "below HL min: notional ${} < min ${}",
+        "below HL min: notional ${} < min ${} (sz={}, px={})",
         notional,
-        MIN_NOTIONAL_USD
+        MIN_NOTIONAL_USD,
+        order_sz,
+        order_px
     );
     assert!(
         notional < MAX_NOTIONAL_USD,
@@ -142,8 +160,16 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
     );
     let safety_pct = (best_bid - order_px) / best_bid * dec!(100);
     eprintln!(
-        "ETH best_bid={}, tick={}, order_px={} ({} ticks below, ≈{:.2}% safety), notional≈${}",
-        best_bid, tick, order_px, TICKS_BELOW_BID, safety_pct, notional
+        "ETH best_bid={}, tick={}, order_px={} ({} ticks below, ≈{:.2}% safety), \
+         sz={} (target ${}), notional≈${}",
+        best_bid,
+        tick,
+        order_px,
+        TICKS_BELOW_BID,
+        safety_pct,
+        order_sz,
+        TARGET_NOTIONAL_USD,
+        notional
     );
 
     // === place ALO post-only ===
@@ -154,7 +180,7 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
         asset: eth_idx,
         side: Side::Long,
         px: order_px,
-        sz: ORDER_SZ_ETH,
+        sz: order_sz,
         tif: Tif::Alo,
         reduce_only: false,
     };
@@ -183,7 +209,12 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
             pr.oid, cloid
         );
     }
-    assert_eq!(pr.status, "resting", "expected resting, got {}", pr.status);
+    assert_eq!(
+        pr.status, "resting",
+        "expected resting, got {} (cloid={}, oid={:?}, error={:?}) — \
+         if oid is Some, an order may be open on HL UI requiring manual cancel",
+        pr.status, cloid, pr.oid, pr.error
+    );
     let oid = pr.oid.expect("resting must have oid");
 
     // brief wait so HL has time to reflect the open order on the API
