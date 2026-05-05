@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::HlError;
 
 use crate::eip712::{action_hash, build_agent, l1_domain};
-use crate::eip712::{DummyAction, OrderAction, ScheduleCancelAction};
+use crate::eip712::{CancelByCloidAction, DummyAction, OrderAction, ScheduleCancelAction};
 use alloy::primitives::Address as AlloyAddress;
 use alloy::signers::SignerSync;
 use alloy::sol_types::SolStruct;
@@ -32,8 +32,15 @@ pub trait Signer: Send + Sync {
     /// Address that this signer signs for.
     fn address(&self) -> Address;
 
-    /// Sign an L1 action with a specific nonce. Returns EIP-712 signature.
-    async fn sign_l1(&self, action: &Action, nonce: u64) -> Result<Signature, HlError>;
+    /// Sign an L1 action with a specific nonce.
+    /// `vault` allows trading on behalf of a vault/subaccount; pass `None`
+    /// for direct master/agent action.
+    async fn sign_l1(
+        &self,
+        action: &Action,
+        nonce: u64,
+        vault: Option<&Address>,
+    ) -> Result<Signature, HlError>;
 }
 
 /// 80 % prototype signer. Always returns a deterministic dummy signature so the
@@ -71,7 +78,12 @@ impl Signer for MockSigner {
         self.address.clone()
     }
 
-    async fn sign_l1(&self, _action: &Action, nonce: u64) -> Result<Signature, HlError> {
+    async fn sign_l1(
+        &self,
+        _action: &Action,
+        nonce: u64,
+        _vault: Option<&Address>,
+    ) -> Result<Signature, HlError> {
         // Deterministic dummy: r/s embed the nonce so the test can assert on them.
         Ok(Signature {
             r: format!("0x{:064x}", nonce),
@@ -110,8 +122,24 @@ impl Signer for Eip712AgentSigner {
         Address::new(format!("{:#x}", self.inner.address()))
     }
 
-    async fn sign_l1(&self, action: &Action, nonce: u64) -> Result<Signature, HlError> {
-        let hash = dispatch_and_hash(action, nonce, None)?;
+    async fn sign_l1(
+        &self,
+        action: &Action,
+        nonce: u64,
+        vault: Option<&Address>,
+    ) -> Result<Signature, HlError> {
+        // Convert executor_core::types::Address (String wrapper) to alloy
+        // 20-byte typed Address for action_hash. Parse failures surface as
+        // ActionFormat (dynamic input data, not config).
+        let vault_alloy = vault
+            .map(|a| {
+                a.as_str()
+                    .parse::<AlloyAddress>()
+                    .map_err(|e| HlError::ActionFormat(format!("vault address parse: {e}")))
+            })
+            .transpose()?;
+
+        let hash = dispatch_and_hash(action, nonce, vault_alloy.as_ref())?;
         let agent = build_agent(hash, self.is_mainnet);
         let signing_hash = agent.eip712_signing_hash(&l1_domain());
 
@@ -173,6 +201,12 @@ fn dispatch_and_hash(
             action_hash(&typed, nonce, vault, None)
                 .map_err(|e| HlError::ActionFormat(format!("scheduleCancel msgpack: {e}")))
         }
+        "cancelByCloid" => {
+            let typed = CancelByCloidAction::deserialize(action)
+                .map_err(|e| HlError::ActionFormat(format!("cancelByCloid decode: {e}")))?;
+            action_hash(&typed, nonce, vault, None)
+                .map_err(|e| HlError::ActionFormat(format!("cancelByCloid msgpack: {e}")))
+        }
         other => Err(HlError::ActionFormat(format!(
             "unsupported action type for Eip712AgentSigner: {other}"
         ))),
@@ -194,8 +228,8 @@ mod tests {
     #[tokio::test]
     async fn mock_signer_sign_is_deterministic_per_nonce() {
         let s = MockSigner::new();
-        let a = s.sign_l1(&json!({"x": 1}), 12345).await.unwrap();
-        let b = s.sign_l1(&json!({"y": 2}), 12345).await.unwrap();
+        let a = s.sign_l1(&json!({"x": 1}), 12345, None).await.unwrap();
+        let b = s.sign_l1(&json!({"y": 2}), 12345, None).await.unwrap();
         // Mock includes the nonce in the signature, so same nonce → same r/s.
         assert_eq!(a, b);
     }
@@ -203,8 +237,8 @@ mod tests {
     #[tokio::test]
     async fn mock_signer_different_nonce_different_sig() {
         let s = MockSigner::new();
-        let a = s.sign_l1(&json!({}), 1).await.unwrap();
-        let b = s.sign_l1(&json!({}), 2).await.unwrap();
+        let a = s.sign_l1(&json!({}), 1, None).await.unwrap();
+        let b = s.sign_l1(&json!({}), 2, None).await.unwrap();
         assert_ne!(a, b);
     }
 }

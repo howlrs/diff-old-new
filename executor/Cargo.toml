@@ -63,6 +63,7 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 mockall = "0.13"
 proptest = "1"
 rstest = "0.24"
+mockito = "1.7.2"
 
 # Internal crates (path)
 executor-core = { path = "crates/executor-core" }

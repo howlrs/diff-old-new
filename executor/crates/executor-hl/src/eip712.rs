@@ -20,6 +20,9 @@ use alloy::primitives::{keccak256, Address, B256};
 use alloy::sol;
 use alloy::sol_types::{eip712_domain, Eip712Domain};
 
+use executor_core::intent::OrderIntent;
+use executor_core::types::{Side, Tif};
+
 /// Serialize an action struct to msgpack bytes in the named-map form Python
 /// SDK uses. Always call this — never `rmp_serde::to_vec` directly — for any
 /// payload that flows into `action_hash`.
@@ -77,6 +80,47 @@ pub struct ScheduleCancelAction {
     pub action_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<u64>,
+}
+
+/// `{"type": "cancelByCloid", "cancels": [{asset, cloid}, ...]}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelByCloidAction {
+    #[serde(rename = "type")]
+    pub action_type: String,
+    pub cancels: Vec<CancelByCloidWire>,
+}
+
+/// One cancel wire item. Field order: asset (full word, NOT `a`), cloid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelByCloidWire {
+    pub asset: u32,
+    pub cloid: String,
+}
+
+/// Convert an `OrderIntent` (executor-core domain type) into the HL wire
+/// shape `OrderWire`.
+///
+/// The caller passes `OrderIntent.asset` directly (set at intent construction
+/// time, currently 0 for algorithm-runtime callers — to be resolved via
+/// meta cache in PR-B2b).
+pub fn order_intent_to_wire(intent: &OrderIntent) -> OrderWire {
+    OrderWire {
+        a: intent.asset,
+        b: matches!(intent.side, Side::Long),
+        p: format!("{}", intent.px),
+        s: format!("{}", intent.sz),
+        r: intent.reduce_only,
+        t: OrderTypeWire {
+            limit: LimitTif {
+                tif: match intent.tif {
+                    Tif::Alo => "Alo".into(),
+                    Tif::Ioc => "Ioc".into(),
+                    Tif::Gtc => "Gtc".into(),
+                },
+            },
+        },
+        c: Some(format!("{}", intent.cloid)),
+    }
 }
 
 // === EIP-712 typed-data ===
@@ -210,5 +254,28 @@ mod tests {
         let t = build_agent(h, false);
         assert_eq!(m.source, "a");
         assert_eq!(t.source, "b");
+    }
+
+    /// `pack_action(&CancelByCloidAction{...})` must serialize as a msgpack
+    /// MAP (not array), with `type`/`cancels` keys at the top and per-cancel
+    /// `asset`/`cloid` keys nested. Sanity check only — full byte match isn't
+    /// required because the cross-check fixture covers signing end-to-end via
+    /// dispatch_and_hash.
+    #[test]
+    fn cancel_by_cloid_action_msgpack_starts_with_map_marker() {
+        let action = CancelByCloidAction {
+            action_type: "cancelByCloid".into(),
+            cancels: vec![CancelByCloidWire {
+                asset: 1,
+                cloid: "0x00000000000000000000000000000001".into(),
+            }],
+        };
+        let bytes = pack_action(&action).unwrap();
+        // 0x82 = fix-map(2) — top-level has "type" + "cancels"
+        assert_eq!(
+            bytes[0], 0x82,
+            "expected fix-map(2), got 0x{:02x}",
+            bytes[0]
+        );
     }
 }

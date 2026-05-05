@@ -241,6 +241,7 @@ mod tests {
         OrderIntent {
             cloid,
             symbol: Symbol::new("BTC"),
+            asset: 0,
             side: Side::Long,
             px: dec!(50000),
             sz: dec!(0.01),
@@ -286,6 +287,7 @@ mod tests {
         sender
             .enqueue(OrderOrCancel::Cancel(CancelIntent {
                 symbol: Symbol::new("BTC"),
+                asset: 0,
                 by_cloid: Some(Cloid::new()),
                 by_oid: None,
             }))

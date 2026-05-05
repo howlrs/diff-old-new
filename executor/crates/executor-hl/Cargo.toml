@@ -49,6 +49,7 @@ hex = { workspace = true }
 
 [dev-dependencies]
 mockall = { workspace = true }
+mockito = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 rust_decimal_macros = { workspace = true }
