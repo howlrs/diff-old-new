@@ -33,8 +33,13 @@ use secrecy::SecretString;
 use std::sync::Arc;
 use std::time::Duration;
 
-const MAX_NOTIONAL_USD: Decimal = dec!(5);
-const ORDER_SZ_ETH: Decimal = dec!(0.001);
+/// HL enforces a minimum order notional of $10. We pick 0.005 ETH so that at
+/// $2000-$3000/ETH the notional sits comfortably above $10 (~$11-$15) and well
+/// under MAX_NOTIONAL_USD. With 10x leverage this is ~$1.5 margin — trivial
+/// against the master EOA's withdrawable balance.
+const MAX_NOTIONAL_USD: Decimal = dec!(20);
+const MIN_NOTIONAL_USD: Decimal = dec!(10);
+const ORDER_SZ_ETH: Decimal = dec!(0.005);
 /// Number of ticks below best_bid to place the ALO post-only order.
 /// HL ETH typical tick = $0.1 → 100 ticks = $10 (~0.4% below best_bid),
 /// well below cross threshold while staying inside HL's 5-sig-fig + szDecimals
@@ -123,6 +128,12 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
     );
     let order_px = best_bid - tick * Decimal::from(TICKS_BELOW_BID);
     let notional = order_px * ORDER_SZ_ETH;
+    assert!(
+        notional >= MIN_NOTIONAL_USD,
+        "below HL min: notional ${} < min ${}",
+        notional,
+        MIN_NOTIONAL_USD
+    );
     assert!(
         notional < MAX_NOTIONAL_USD,
         "size cap violated: notional ${} >= max ${}",
