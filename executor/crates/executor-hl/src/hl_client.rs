@@ -240,6 +240,10 @@ pub struct MockHlClient {
     pub account: Mutex<AccountStateSnapshot>,
     /// Pre-seeded book per symbol.
     pub books: Mutex<HashMap<Symbol, OrderBook>>,
+    /// PR-C3: when `true`, `fetch_account_state` returns
+    /// `Err(HlError::Network)` so guard tests can exercise consecutive-error
+    /// counting. Set via `set_fail_account_state`.
+    fail_account_state: std::sync::atomic::AtomicBool,
 }
 
 impl Default for MockHlClient {
@@ -251,6 +255,7 @@ impl Default for MockHlClient {
                 "0x0000000000000000000000000000000000000000",
             ))),
             books: Mutex::new(HashMap::new()),
+            fail_account_state: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -279,6 +284,14 @@ impl MockHlClient {
             *g = snap;
         }
     }
+
+    /// PR-C3: control whether `fetch_account_state` returns an error.
+    /// Tests for the BaselineGuard's consecutive-error counter call this with
+    /// `true` to simulate transient network failures.
+    pub fn set_fail_account_state(&self, fail: bool) {
+        self.fail_account_state
+            .store(fail, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[async_trait]
@@ -288,6 +301,14 @@ impl HlClient for MockHlClient {
         address: &Address,
         _dex: Option<&str>,
     ) -> Result<AccountStateSnapshot, HlError> {
+        if self
+            .fail_account_state
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(HlError::Network(
+                "mock: fetch_account_state forced failure".into(),
+            ));
+        }
         let snap = self
             .account
             .lock()

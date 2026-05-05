@@ -451,6 +451,116 @@ async fn start_exec_notional_exceeded_400() {
     );
 }
 
+// ---- PR-C3: idempotent emergency_stop + 503 after stop ----
+
+#[tokio::test]
+async fn emergency_stop_idempotent() {
+    let (state, _) = build_state_with_seed().await;
+    // Pre-seed an open order so the first call has work to do.
+    {
+        let mut g = state.app_state.open_orders.write().await;
+        let cloid = executor_core::cloid::Cloid::new();
+        g.insert(
+            cloid,
+            executor_core::state::OpenOrder {
+                cloid,
+                oid: None,
+                symbol: Symbol::new("BTC"),
+                side: executor_core::types::Side::Long,
+                px: dec!(50000),
+                sz: dec!(0.1),
+                filled_sz: dec!(0),
+                tif: executor_core::types::Tif::Alo,
+                reduce_only: false,
+                placed_at: chrono::Utc::now(),
+            },
+        );
+    }
+    let app = build_app(state);
+
+    // First call → expect cancelled >= 1.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/emergency_stop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        v["cancelled_orders"].as_u64().unwrap() >= 1,
+        "first call must cancel the seeded order"
+    );
+
+    // Second call → expect (0, 0) — idempotency gate fires.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/emergency_stop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["aborted_executions"], 0);
+    assert_eq!(v["cancelled_orders"], 0);
+}
+
+#[tokio::test]
+async fn start_exec_after_emergency_stop_503() {
+    let (state, _) = build_state_with_seed().await;
+    let app = build_app(state);
+
+    // Trigger emergency_stop.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/emergency_stop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // start_exec must now return 503.
+    let req_body = json!({
+        "algorithm": "market",
+        "symbol": "BTC",
+        "intent": "open",
+        "target_size": "0.001",
+        "params": {}
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/exec")
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let msg = v["message"].as_str().unwrap_or("");
+    assert!(msg.contains("emergency_stop"), "unexpected message: {msg}");
+}
+
 #[tokio::test]
 async fn start_exec_within_caps_200() {
     // Allow-list = {BTC}; cap = $100. Seeded book best_bid = $49999.

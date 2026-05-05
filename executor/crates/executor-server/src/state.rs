@@ -4,6 +4,7 @@
 //! algorithms, the `HlClient` (Mock or Real), the `Signer`, and the
 //! `ExecutionRegistry` of running executions.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use executor_core::state::AppState;
@@ -23,6 +24,11 @@ pub struct ServerState {
     pub batch_handle: tokio::sync::Mutex<Option<BatchSenderHandle>>,
     pub registry: ExecutionRegistry,
     pub safety: Arc<SafetyGate>,
+    /// PR-C3: flipped to `true` once any caller initiates emergency_stop.
+    /// Used to:
+    /// - idempotency-gate `execute_emergency_stop` (only the first caller does the work)
+    /// - reject new `start_exec` calls with HTTP 503 after a stop
+    pub shutdown_initiated: AtomicBool,
 }
 
 impl ServerState {
@@ -42,6 +48,7 @@ impl ServerState {
             batch_handle: tokio::sync::Mutex::new(Some(batch_handle)),
             registry: ExecutionRegistry::new(),
             safety,
+            shutdown_initiated: AtomicBool::new(false),
         }
     }
 }
@@ -52,6 +59,12 @@ impl std::fmt::Debug for ServerState {
             .field("app_state", &self.app_state)
             .field("registry", &self.registry)
             .field("safety", &self.safety)
+            .field(
+                "shutdown_initiated",
+                &self
+                    .shutdown_initiated
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
             .finish_non_exhaustive()
     }
 }

@@ -19,6 +19,10 @@ pub enum ServerError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// PR-C3: server is in emergency_stop state and refuses new work.
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
 }
 
 #[derive(Serialize)]
@@ -46,6 +50,11 @@ impl IntoResponse for ServerError {
                     "internal server error".to_string(),
                 )
             }
+            ServerError::ServiceUnavailable(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                self.to_string(),
+            ),
         };
         (status, Json(ErrorBody { code, message: msg })).into_response()
     }

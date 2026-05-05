@@ -19,12 +19,14 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use executor_core::state::AppState;
+use executor_core::types::Address;
 use executor_hl::batch_sender::{spawn_batch_sender_with_gate, BatchSenderConfig};
 use executor_hl::hl_client::{HlClient, HlConfig, MockHlClient, RealHlClient};
 use executor_hl::meta::MetaCache;
 use executor_hl::signer::{Eip712AgentSigner, MockSigner, Signer};
 use executor_hl::IntentChecker;
-use executor_server::{build_app, SafetyGate, ServerState};
+use executor_server::{build_app, BaselineGuard, SafetyGate, ServerState};
+use rust_decimal::Decimal;
 use secrecy::SecretString;
 
 #[derive(Parser, Debug)]
@@ -51,6 +53,41 @@ struct Args {
     /// Per-order USD notional cap. Omit for no cap (NOT recommended for production).
     #[arg(long, env = "EXECUTOR_MAINNET_MAX_NOTIONAL_USD")]
     mainnet_max_notional_usd: Option<u64>,
+
+    /// Enable PR-C3 baseline-diff guard (real mode only). Pass
+    /// `--baseline-guard false` (or set `EXECUTOR_BASELINE_GUARD=false`) to
+    /// disable. Mock mode always skips the guard regardless of this flag.
+    #[arg(
+        long,
+        env = "EXECUTOR_BASELINE_GUARD",
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+    )]
+    baseline_guard: bool,
+
+    /// Master EOA address whose perp positions to monitor (defaults to env
+    /// `HL_MASTER_ADDRESS`). Required when `--baseline-guard` is true (real mode).
+    #[arg(long, env = "HL_MASTER_ADDRESS")]
+    master_address: Option<String>,
+
+    /// Baseline-guard polling interval in seconds.
+    #[arg(long, env = "EXECUTOR_BASELINE_POLL_SECS", default_value_t = 60)]
+    baseline_poll_secs: u64,
+
+    /// Comma-separated dex list to monitor (e.g. "default,xyz"). `default` and
+    /// blank entries are mapped to the default-dex (None).
+    #[arg(long, env = "EXECUTOR_BASELINE_DEXES", default_value = "default,xyz")]
+    baseline_dexes: String,
+
+    /// szi diff epsilon (decimal). 0 = strict; raise if HL clearinghouseState
+    /// shows occasional dust drift unrelated to actual position changes.
+    #[arg(long, env = "EXECUTOR_BASELINE_SZI_EPSILON", default_value = "0")]
+    baseline_szi_epsilon: String,
+
+    /// Number of consecutive `fetch_account_state` failures before the guard
+    /// auto-fires `emergency_stop`.
+    #[arg(long, env = "EXECUTOR_BASELINE_MAX_CONSEC_ERRORS", default_value_t = 5)]
+    baseline_max_consec_errors: u32,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -160,6 +197,95 @@ async fn main() -> anyhow::Result<()> {
         safety,
     ));
 
+    // PR-C3: capture baseline + spawn tick task. Real mode only.
+    if matches!(args.mode, Mode::Real) && args.baseline_guard {
+        let master = args
+            .master_address
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--master-address (or HL_MASTER_ADDRESS env) required for --mode real with baseline-guard. \
+                     Pass --baseline-guard=false to disable."
+                )
+            })?;
+        let dexes = parse_dexes_csv(&args.baseline_dexes);
+        let szi_epsilon: Decimal = args.baseline_szi_epsilon.parse().with_context(|| {
+            format!(
+                "invalid --baseline-szi-epsilon: {}",
+                args.baseline_szi_epsilon
+            )
+        })?;
+        let guard = BaselineGuard::capture(
+            state.hl_client.as_ref(),
+            Address::new(master),
+            dexes,
+            Duration::from_secs(args.baseline_poll_secs),
+            szi_epsilon,
+        )
+        .await
+        .context("BaselineGuard::capture failed")?;
+        tracing::info!(
+            master = master,
+            dexes = ?guard.dexes,
+            baseline_size = guard.baseline.len(),
+            poll_secs = guard.poll_interval.as_secs(),
+            szi_epsilon = ?guard.szi_epsilon,
+            "BaselineGuard captured",
+        );
+
+        let guard = Arc::new(guard);
+        let task_state = state.clone();
+        let task_client = state.hl_client.clone();
+        let max_consec = args.baseline_max_consec_errors;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(guard.poll_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Skip the immediate first tick — `interval(d)` fires once at t=0.
+            ticker.tick().await;
+            let mut consec_errors: u32 = 0;
+            loop {
+                ticker.tick().await;
+                match guard.check_once(task_client.as_ref()).await {
+                    Ok(violations) if violations.is_empty() => {
+                        consec_errors = 0;
+                        tracing::trace!("baseline_guard: tick clean");
+                    }
+                    Ok(violations) => {
+                        tracing::error!(?violations, "BASELINE VIOLATION DETECTED");
+                        let _ = executor_server::routes::execute_emergency_stop(
+                            &task_state,
+                            "baseline_guard",
+                        )
+                        .await;
+                        tracing::error!("baseline_guard: emergency_stop fired, exiting tick loop");
+                        break;
+                    }
+                    Err(e) => {
+                        consec_errors += 1;
+                        tracing::warn!(
+                            error = %e,
+                            consec_errors,
+                            max_consec,
+                            "baseline_guard: fetch failed",
+                        );
+                        if consec_errors >= max_consec {
+                            tracing::error!(
+                                consec_errors,
+                                "baseline_guard: too many consecutive failures, firing emergency_stop"
+                            );
+                            let _ = executor_server::routes::execute_emergency_stop(
+                                &task_state,
+                                "baseline_guard_consec_errors",
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     let app = build_app(state);
     tracing::info!(bind = %args.bind, "executor-server listening");
     let listener = tokio::net::TcpListener::bind(&args.bind)
@@ -167,4 +293,20 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {}", args.bind))?;
     axum::serve(listener, app).await.context("axum::serve")?;
     Ok(())
+}
+
+/// Parse `"default,xyz"` → `[None, Some("xyz")]`. Empty entries and the
+/// literal `default` (case-insensitive) are mapped to the default-dex.
+fn parse_dexes_csv(s: &str) -> Vec<Option<String>> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.eq_ignore_ascii_case("default") {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .collect()
 }

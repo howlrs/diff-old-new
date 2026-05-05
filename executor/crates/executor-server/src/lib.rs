@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod baseline;
 pub mod error;
 pub mod registry;
 pub mod router;
@@ -24,6 +25,7 @@ pub mod safety;
 pub mod state;
 pub mod ws;
 
+pub use baseline::{BaselineGuard, BaselineKey, BaselineViolation};
 pub use error::ServerError;
 pub use registry::{ExecutionHandle, ExecutionRegistry, ExecutionStatus};
 pub use router::OrderRouter;
