@@ -416,11 +416,6 @@ impl RealHlClient {
 
     /// Resolve a symbol to its asset index using the cached meta.
     /// Used by both `place_orders` and `cancel_orders` (Task 6).
-    ///
-    /// `allow(dead_code)`: introduced in PR-C1 Task 4. Wired into
-    /// `place_orders` / `cancel_orders` in Task 6 once `OrderIntent.asset`
-    /// is removed (Task 5).
-    #[allow(dead_code)]
     pub(crate) fn resolve_asset(
         &self,
         symbol: &executor_core::symbol::Symbol,
@@ -555,11 +550,38 @@ impl HlClient for RealHlClient {
         let weight = 1 + (orders.len() as u32 / 40);
         let _wait = self.rate_limiter.acquire(weight).await;
 
-        let order_wires: Vec<crate::eip712::OrderWire> = orders
-            .iter()
-            .map(crate::eip712::order_intent_to_wire)
-            .collect();
+        // Resolve each intent's asset; collect resolved (idx, wire) pairs and
+        // immediately-rejected (idx, error_response) pairs so the final output
+        // matches the input order exactly. UnknownSymbol drops a single order;
+        // other Err variants abort the whole batch.
+        let mut responses: Vec<Option<OrderResponse>> = (0..orders.len()).map(|_| None).collect();
+        let mut wires_with_idx: Vec<(usize, crate::eip712::OrderWire)> =
+            Vec::with_capacity(orders.len());
+        for (i, intent) in orders.iter().enumerate() {
+            match self.resolve_asset(&intent.symbol) {
+                Ok(asset) => {
+                    wires_with_idx
+                        .push((i, crate::eip712::order_intent_to_wire(intent, asset)));
+                }
+                Err(HlError::UnknownSymbol(sym)) => {
+                    tracing::error!(symbol = %sym, "place_orders: unknown symbol; dropping");
+                    responses[i] = Some(OrderResponse {
+                        cloid: intent.cloid,
+                        oid: None,
+                        status: "error".into(),
+                        error: Some(format!("unknown symbol: {sym}")),
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
+        if wires_with_idx.is_empty() {
+            return Ok(responses.into_iter().flatten().collect());
+        }
+
+        let order_wires: Vec<crate::eip712::OrderWire> =
+            wires_with_idx.iter().map(|(_, w)| w.clone()).collect();
         let action = crate::eip712::OrderAction {
             action_type: "order".into(),
             orders: order_wires,
@@ -573,7 +595,6 @@ impl HlClient for RealHlClient {
             .map(|d| d.as_millis() as u64)
             .unwrap_or_default();
 
-        // PR-B2a: vault always None. PR-B2b will plumb vault through `place_orders`.
         let sig = self.signer.sign_l1(&action_value, nonce, None).await?;
 
         let body = serde_json::json!({
@@ -584,10 +605,25 @@ impl HlClient for RealHlClient {
         });
 
         let resp_text = self.post_exchange(&body).await?;
-        parse_exchange_response(&resp_text, orders)
+
+        // Parse only the orders that were actually sent. Build a Vec<OrderIntent>
+        // matching wires_with_idx order so parse_exchange_response can attribute
+        // each parsed status to the originating intent's cloid.
+        let sent_intents_owned: Vec<OrderIntent> =
+            wires_with_idx.iter().map(|(i, _)| orders[*i].clone()).collect();
+        let parsed = parse_exchange_response(&resp_text, &sent_intents_owned)?;
+
+        for ((i, _), resp) in wires_with_idx.iter().zip(parsed) {
+            responses[*i] = Some(resp);
+        }
+
+        Ok(responses.into_iter().flatten().collect())
     }
 
-    async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError> {
+    async fn cancel_orders(
+        &self,
+        cancels: &[CancelIntent],
+    ) -> Result<Vec<OrderResponse>, HlError> {
         if cancels.is_empty() {
             return Ok(Vec::new());
         }
@@ -595,26 +631,53 @@ impl HlClient for RealHlClient {
         let weight = 1 + (cancels.len() as u32 / 40);
         let _wait = self.rate_limiter.acquire(weight).await;
 
-        // PR-B2a: cancelByCloid only. If `by_cloid` is present we use it
-        // (silently ignoring any `by_oid` to avoid breaking emergency_stop
-        // flows that opportunistically include both). If only `by_oid` is
-        // present (no cloid), we reject — by-oid path arrives in a later PR.
-        let cancel_wires: Result<Vec<crate::eip712::CancelByCloidWire>, HlError> = cancels
-            .iter()
-            .map(|c| match c.by_cloid {
-                Some(cloid) => Ok(crate::eip712::CancelByCloidWire {
-                    asset: c.asset,
-                    cloid: format!("{}", cloid),
-                }),
-                None => Err(HlError::ActionFormat(
-                    "by_oid-only cancel not supported in PR-B2a; CancelIntent must \
-                     include by_cloid (PR-B2b will add by_oid path)"
-                        .into(),
-                )),
-            })
-            .collect();
-        let cancel_wires = cancel_wires?;
+        // Validate by_cloid presence and resolve asset per intent. Same
+        // index-preservation pattern as place_orders.
+        let mut responses: Vec<Option<OrderResponse>> = (0..cancels.len()).map(|_| None).collect();
+        let mut wires_with_idx: Vec<(usize, crate::eip712::CancelByCloidWire)> =
+            Vec::with_capacity(cancels.len());
+        for (i, c) in cancels.iter().enumerate() {
+            // by_oid-only is still rejected (PR-B2a contract; PR-B2b
+            // emergency_stop fix accepts by_cloid + by_oid, using cloid).
+            let cloid = match c.by_cloid {
+                Some(cl) => cl,
+                None => {
+                    return Err(HlError::ActionFormat(
+                        "by_oid-only cancel not supported in PR-B2a; CancelIntent must \
+                         include by_cloid (PR-B2b will add by_oid path)"
+                            .into(),
+                    ));
+                }
+            };
+            match self.resolve_asset(&c.symbol) {
+                Ok(asset) => {
+                    wires_with_idx.push((
+                        i,
+                        crate::eip712::CancelByCloidWire {
+                            asset,
+                            cloid: format!("{cloid}"),
+                        },
+                    ));
+                }
+                Err(HlError::UnknownSymbol(sym)) => {
+                    tracing::error!(symbol = %sym, "cancel_orders: unknown symbol; dropping");
+                    responses[i] = Some(OrderResponse {
+                        cloid,
+                        oid: None,
+                        status: "error".into(),
+                        error: Some(format!("unknown symbol: {sym}")),
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
+        if wires_with_idx.is_empty() {
+            return Ok(responses.into_iter().flatten().collect());
+        }
+
+        let cancel_wires: Vec<crate::eip712::CancelByCloidWire> =
+            wires_with_idx.iter().map(|(_, w)| w.clone()).collect();
         let action = crate::eip712::CancelByCloidAction {
             action_type: "cancelByCloid".into(),
             cancels: cancel_wires,
@@ -637,7 +700,16 @@ impl HlClient for RealHlClient {
         });
 
         let resp_text = self.post_exchange(&body).await?;
-        parse_cancel_response(&resp_text, cancels)
+
+        let sent_cancels_owned: Vec<CancelIntent> =
+            wires_with_idx.iter().map(|(i, _)| cancels[*i].clone()).collect();
+        let parsed = parse_cancel_response(&resp_text, &sent_cancels_owned)?;
+
+        for ((i, _), resp) in wires_with_idx.iter().zip(parsed) {
+            responses[*i] = Some(resp);
+        }
+
+        Ok(responses.into_iter().flatten().collect())
     }
 }
 
