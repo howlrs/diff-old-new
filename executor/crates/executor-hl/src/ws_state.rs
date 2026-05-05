@@ -154,15 +154,21 @@ impl WsStateManager {
             fee: f.fee,
             ts: Utc::now(),
         };
-        let mut fills = self.state.recent_fills.write().await;
-        fills.push_back(fill);
-        const MAX_FILLS: usize = 1024;
-        while fills.len() > MAX_FILLS {
-            fills.pop_front();
+        {
+            let mut fills = self.state.recent_fills.write().await;
+            fills.push_back(fill);
+            const MAX_FILLS: usize = 1024;
+            while fills.len() > MAX_FILLS {
+                fills.pop_front();
+            }
+            // Drop the recent_fills lock before taking open_orders. Holding
+            // both locks across an .await would serialise apply_fill behind
+            // any reader of recent_fills (algorithms drain via `state.recent_fills`)
+            // and adds an avoidable lock-order edge that could deadlock once
+            // future code grabs them in the opposite order. Gemini review
+            // 2026-05-05 flagged this when the explicit `drop(fills)` from
+            // the PR-D4 path was naively walked back in PR-D8.
         }
-        // Drop the fills lock before taking other write locks to avoid
-        // serialising the rest of apply_fill behind it.
-        drop(fills);
         // remove or shrink open_orders entry by cloid
         if let Some(cloid) = f.cloid {
             let mut open = self.state.open_orders.write().await;
@@ -173,33 +179,24 @@ impl WsStateManager {
                 }
             }
         }
-        // PR-D4: extrapolate the fill into AppState.position so consumers
-        // (BaselineGuard reads through REST, but `/v1/positions`, the
-        // algorithm's `snapshot_position_size`, and any future consumer all
-        // read from `state.position`) see the updated size immediately,
-        // not after the 5-min reconcile tick.
+        // PR-D8 (2026-05-05): the PR-D4 path that extrapolated `f.sz/f.side`
+        // into `state.position` here was reverted. Live observation showed
+        // it double-counted: the WS userFills snapshot delivered just after
+        // (re)connect re-applies historical fills already accounted for in
+        // the preceding REST reconcile, so master ETH 0.105 reported as 0.210.
         //
-        // This is intentionally additive: the next `WsPosition` event from
-        // HL or the next REST reconcile will overwrite both `size` and the
-        // entry_px/pnl/margin fields with HL's authoritative numbers. This
-        // step only closes the visibility gap between "fill landed" and
-        // "HL pushed/we polled the new position summary".
+        // `seen_trade_ids` only dedupes against fills WE saw earlier on this
+        // process; it doesn't know what the REST snapshot already absorbed.
+        // Without an HL-side `isSnapshot` flag (none exists) and given clock
+        // drift makes timestamp gating unreliable, the safe answer is to
+        // keep `state.position` strictly synced from the authoritative
+        // sources (REST reconcile + future WsPosition / webData2 channel).
         //
-        // Live observation 2026-05-05 (PR-D1 POSTMORTEM): without this,
-        // master ETH grew to 0.105 on chain but `/v1/positions` reported
-        // 0.1 with last_update from 5 minutes earlier — BaselineGuard saw
-        // the right value via REST and emergency_stopped, while the algo
-        // saw the stale 0.1 and would have placed another round on top.
-        {
-            let mut positions = self.state.position.write().await;
-            let pos = positions.entry(f.coin.clone()).or_default();
-            let signed = match f.side {
-                Side::Long => f.sz,
-                Side::Short => -f.sz,
-            };
-            pos.size += signed;
-            pos.last_update = Some(Utc::now());
-        }
+        // Visibility gap: `/v1/positions` is updated at startup and every
+        // 5 min reconcile. `passive_follow` derives size from `target_size`
+        // absolutely (Intent::Open), so the gap doesn't affect it. A real
+        // PR-D9 will subscribe HL `webData2` so the position channel is
+        // pushed in real time as the authoritative absolute value.
     }
 
     async fn apply_position(&self, p: WsPosition) {
@@ -476,23 +473,22 @@ mod tests {
         assert!(!open.contains_key(&cloid));
     }
 
-    /// PR-D4 regression: a Long fill must extrapolate into
-    /// `state.position[coin].size` immediately so consumers don't have to
-    /// wait for the next reconcile tick or `WsPosition` event to see the
-    /// new size. Live observation 2026-05-05: master ETH grew on-chain but
-    /// `/v1/positions` stayed at the pre-fill value for minutes.
+    /// PR-D8 regression: a userFills WS message must NOT mutate
+    /// `state.position`. The only writers are `apply_position` (WS
+    /// userPosition / future webData2) and `reconcile` (REST snapshot).
+    /// Live observation 2026-05-05: PR-D4 had apply_fill +=size which
+    /// double-counted against the WS reconnect snapshot, ETH 0.105 → 0.210.
     #[tokio::test]
-    async fn apply_fill_extrapolates_position_size_long() {
+    async fn apply_fill_does_not_touch_position() {
         let state = Arc::new(AppState::new());
         let mgr = WsStateManager::new(state.clone());
-        // Pre-condition: position starts at 0.1 (could be from earlier
-        // reconcile / WsPosition).
+        // Pre-condition: a reconcile-style position is in place.
         {
             let mut g = state.position.write().await;
             g.insert(
                 Symbol::new("ETH"),
                 executor_core::state::Position {
-                    size: dec!(0.1),
+                    size: dec!(0.105),
                     ..Default::default()
                 },
             );
@@ -513,76 +509,8 @@ mod tests {
         assert_eq!(
             p.size,
             dec!(0.105),
-            "long fill of 0.005 must add to size in real time"
-        );
-        assert!(p.last_update.is_some());
-    }
-
-    /// Symmetric for Short fills: position size must decrease by sz.
-    #[tokio::test]
-    async fn apply_fill_extrapolates_position_size_short() {
-        let state = Arc::new(AppState::new());
-        let mgr = WsStateManager::new(state.clone());
-        {
-            let mut g = state.position.write().await;
-            g.insert(
-                Symbol::new("ETH"),
-                executor_core::state::Position {
-                    size: dec!(0.1),
-                    ..Default::default()
-                },
-            );
-        }
-        mgr.apply(WsMessage::UserFill(WsFill {
-            coin: Symbol::new("ETH"),
-            cloid: None,
-            oid: 2,
-            tid: 2,
-            side: Side::Short,
-            px: dec!(2400),
-            sz: dec!(0.03),
-            fee: dec!(0.001),
-        }))
-        .await;
-        let pos = state.position.read().await;
-        let p = pos.get(&Symbol::new("ETH")).unwrap();
-        assert_eq!(p.size, dec!(0.07), "short fill subtracts from size");
-    }
-
-    /// Dedup must still fire after PR-D4: a duplicate (oid, tid) fill
-    /// returns early — its size must NOT be applied to position twice.
-    #[tokio::test]
-    async fn apply_fill_dedup_prevents_double_position_update() {
-        let state = Arc::new(AppState::new());
-        let mgr = WsStateManager::new(state.clone());
-        {
-            let mut g = state.position.write().await;
-            g.insert(
-                Symbol::new("ETH"),
-                executor_core::state::Position {
-                    size: dec!(0),
-                    ..Default::default()
-                },
-            );
-        }
-        let fill = WsFill {
-            coin: Symbol::new("ETH"),
-            cloid: None,
-            oid: 7,
-            tid: 9001,
-            side: Side::Long,
-            px: dec!(2400),
-            sz: dec!(0.005),
-            fee: dec!(0.001),
-        };
-        mgr.apply(WsMessage::UserFill(fill.clone())).await;
-        mgr.apply(WsMessage::UserFill(fill)).await;
-        let pos = state.position.read().await;
-        let p = pos.get(&Symbol::new("ETH")).unwrap();
-        assert_eq!(
-            p.size,
-            dec!(0.005),
-            "duplicate (oid,tid) must not double-extrapolate"
+            "apply_fill must not extrapolate into position; that responsibility \
+             belongs to apply_position / reconcile only"
         );
     }
 }
