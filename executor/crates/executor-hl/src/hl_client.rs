@@ -553,13 +553,55 @@ impl HlClient for RealHlClient {
 
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError> {
         if cancels.is_empty() {
-            return Ok(vec![]);
+            return Ok(Vec::new());
         }
-        let _wait = self.rate_limiter.acquire(cancels.len() as u32).await;
-        Err(HlError::Exchange {
-            code: Some("not_implemented".into()),
-            message: "RealHlClient::cancel_orders scaffold (see place_orders).".into(),
-        })
+
+        let weight = 1 + (cancels.len() as u32 / 40);
+        let _wait = self.rate_limiter.acquire(weight).await;
+
+        // by_cloid only. by_oid is explicitly rejected (PR-B2a scope).
+        let cancel_wires: Result<Vec<crate::eip712::CancelByCloidWire>, HlError> = cancels
+            .iter()
+            .map(|c| {
+                if c.by_oid.is_some() {
+                    return Err(HlError::ActionFormat(
+                        "by_oid cancel not supported in PR-B2a; use by_cloid".into(),
+                    ));
+                }
+                let cloid = c.by_cloid.ok_or_else(|| {
+                    HlError::ActionFormat("CancelIntent missing both by_cloid and by_oid".into())
+                })?;
+                Ok(crate::eip712::CancelByCloidWire {
+                    asset: c.asset,
+                    cloid: format!("{}", cloid),
+                })
+            })
+            .collect();
+        let cancel_wires = cancel_wires?;
+
+        let action = crate::eip712::CancelByCloidAction {
+            action_type: "cancelByCloid".into(),
+            cancels: cancel_wires,
+        };
+        let action_value = serde_json::to_value(&action)
+            .map_err(|e| HlError::ActionFormat(format!("cancel serialize: {e}")))?;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default();
+
+        let sig = self.signer.sign_l1(&action_value, nonce, None).await?;
+
+        let body = serde_json::json!({
+            "action": action,
+            "nonce": nonce,
+            "signature": sig,
+            "vaultAddress": serde_json::Value::Null,
+        });
+
+        let resp_text = self.post_exchange(&body).await?;
+        parse_cancel_response(&resp_text, cancels)
     }
 }
 
@@ -641,6 +683,70 @@ fn parse_exchange_response(
                 oid: None,
                 status: "unknown".into(),
                 error: Some(format!("unknown status shape: {status}")),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Parse HL `/exchange` response for a cancelByCloid action.
+///
+/// HL returns cancel success as the bare string `"success"` (NOT an object,
+/// unlike order responses). Per-cancel error is `{"error": "<msg>"}`.
+fn parse_cancel_response(
+    text: &str,
+    cancels: &[CancelIntent],
+) -> Result<Vec<OrderResponse>, HlError> {
+    let v: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| HlError::InvalidResponse(format!("parse cancel json: {e}")))?;
+
+    if v.get("status").and_then(|s| s.as_str()) == Some("err") {
+        let msg = v
+            .get("response")
+            .and_then(|r| r.as_str())
+            .unwrap_or("(no msg)");
+        return Err(HlError::Exchange {
+            code: Some("top_level_err".into()),
+            message: msg.into(),
+        });
+    }
+
+    let statuses = v
+        .pointer("/response/data/statuses")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| HlError::InvalidResponse("cancel statuses missing".into()))?;
+
+    if statuses.len() != cancels.len() {
+        return Err(HlError::InvalidResponse(format!(
+            "cancel statuses len {} != cancels len {}",
+            statuses.len(),
+            cancels.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(statuses.len());
+    for (status, intent) in statuses.iter().zip(cancels.iter()) {
+        let cloid = intent.by_cloid.unwrap_or_default();
+        if status.as_str() == Some("success") {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "cancelled".into(),
+                error: None,
+            });
+        } else if let Some(err) = status.get("error") {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "error".into(),
+                error: Some(err.as_str().unwrap_or("(no msg)").into()),
+            });
+        } else {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "unknown".into(),
+                error: Some(format!("unknown cancel status shape: {status}")),
             });
         }
     }
