@@ -20,6 +20,9 @@ use alloy::primitives::{keccak256, Address, B256};
 use alloy::sol;
 use alloy::sol_types::{eip712_domain, Eip712Domain};
 
+use executor_core::intent::OrderIntent;
+use executor_core::types::{Side, Tif};
+
 /// Serialize an action struct to msgpack bytes in the named-map form Python
 /// SDK uses. Always call this — never `rmp_serde::to_vec` directly — for any
 /// payload that flows into `action_hash`.
@@ -92,6 +95,32 @@ pub struct CancelByCloidAction {
 pub struct CancelByCloidWire {
     pub asset: u32,
     pub cloid: String,
+}
+
+/// Convert an `OrderIntent` (executor-core domain type) into the HL wire
+/// shape `OrderWire`.
+///
+/// The caller passes `OrderIntent.asset` directly (set at intent construction
+/// time, currently 0 for algorithm-runtime callers — to be resolved via
+/// meta cache in PR-B2b).
+pub fn order_intent_to_wire(intent: &OrderIntent) -> OrderWire {
+    OrderWire {
+        a: intent.asset,
+        b: matches!(intent.side, Side::Long),
+        p: format!("{}", intent.px),
+        s: format!("{}", intent.sz),
+        r: intent.reduce_only,
+        t: OrderTypeWire {
+            limit: LimitTif {
+                tif: match intent.tif {
+                    Tif::Alo => "Alo".into(),
+                    Tif::Ioc => "Ioc".into(),
+                    Tif::Gtc => "Gtc".into(),
+                },
+            },
+        },
+        c: Some(format!("{}", intent.cloid)),
+    }
 }
 
 // === EIP-712 typed-data ===

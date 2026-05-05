@@ -414,6 +414,27 @@ impl RealHlClient {
         }
         Ok(text)
     }
+
+    /// POST a JSON body to the /exchange endpoint and return the response body.
+    /// Mirrors `post_info` but targets `config.exchange_url`.
+    async fn post_exchange(&self, body: &serde_json::Value) -> Result<String, HlError> {
+        let resp = self
+            .http
+            .post(&self.config.exchange_url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        if !status.is_success() {
+            return Err(HlError::Network(format!("HTTP {status}: {text}")));
+        }
+        Ok(text)
+    }
 }
 
 #[async_trait]
@@ -491,26 +512,43 @@ impl HlClient for RealHlClient {
     }
 
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError> {
-        // 80% プロト: signer + rate_limiter の枠だけ通す. 実 POST は鍵管理ブレスト後.
         if orders.is_empty() {
-            return Ok(vec![]);
+            return Ok(Vec::new());
         }
-        let _wait = self.rate_limiter.acquire(orders.len() as u32).await;
 
-        // sign for nonce visibility (no real submission).
+        let weight = 1 + (orders.len() as u32 / 40);
+        let _wait = self.rate_limiter.acquire(weight).await;
+
+        let order_wires: Vec<crate::eip712::OrderWire> = orders
+            .iter()
+            .map(crate::eip712::order_intent_to_wire)
+            .collect();
+
+        let action = crate::eip712::OrderAction {
+            action_type: "order".into(),
+            orders: order_wires,
+            grouping: "na".into(),
+        };
+        let action_value = serde_json::to_value(&action)
+            .map_err(|e| HlError::ActionFormat(format!("order serialize: {e}")))?;
+
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or_default();
-        let action = serde_json::json!({"type": "order", "orders": orders.len()});
-        let _sig = self.signer.sign_l1(&action, nonce, None).await?;
 
-        Err(HlError::Exchange {
-            code: Some("not_implemented".into()),
-            message: "RealHlClient::place_orders is the 80% scaffold; \
-                      full HL signing arrives with the key-management PR"
-                .into(),
-        })
+        // PR-B2a: vault always None. PR-B2b will plumb vault through `place_orders`.
+        let sig = self.signer.sign_l1(&action_value, nonce, None).await?;
+
+        let body = serde_json::json!({
+            "action": action,
+            "nonce": nonce,
+            "signature": sig,
+            "vaultAddress": serde_json::Value::Null,
+        });
+
+        let resp_text = self.post_exchange(&body).await?;
+        parse_exchange_response(&resp_text, orders)
     }
 
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError> {
@@ -523,6 +561,90 @@ impl HlClient for RealHlClient {
             message: "RealHlClient::cancel_orders scaffold (see place_orders).".into(),
         })
     }
+}
+
+/// Parse HL `/exchange` response for an order action into per-order `OrderResponse`.
+///
+/// Recognized status shapes per element of `response.data.statuses`:
+/// - `{"resting": {"oid": <u64>}}` -> status="resting"
+/// - `{"filled": {"oid": <u64>, "totalSz": "...", "avgPx": "..."}}` -> status="filled"
+/// - `{"error": "<msg>"}` -> status="error"
+///
+/// Top-level `{"status":"err", "response": "<msg>"}` returns `Err(HlError::Exchange)`.
+fn parse_exchange_response(
+    text: &str,
+    orders: &[OrderIntent],
+) -> Result<Vec<OrderResponse>, HlError> {
+    let v: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| HlError::InvalidResponse(format!("parse exchange json: {e}")))?;
+
+    if v.get("status").and_then(|s| s.as_str()) == Some("err") {
+        let msg = v
+            .get("response")
+            .and_then(|r| r.as_str())
+            .unwrap_or("(no msg)");
+        return Err(HlError::Exchange {
+            code: Some("top_level_err".into()),
+            message: msg.into(),
+        });
+    }
+
+    let statuses = v
+        .pointer("/response/data/statuses")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| HlError::InvalidResponse("statuses missing".into()))?;
+
+    if statuses.len() != orders.len() {
+        return Err(HlError::InvalidResponse(format!(
+            "statuses len {} != orders len {}",
+            statuses.len(),
+            orders.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(statuses.len());
+    for (status, intent) in statuses.iter().zip(orders.iter()) {
+        let cloid = intent.cloid;
+        if let Some(resting) = status.get("resting") {
+            let oid = resting
+                .get("oid")
+                .and_then(|o| o.as_u64())
+                .ok_or_else(|| HlError::InvalidResponse("resting.oid missing".into()))?;
+            out.push(OrderResponse {
+                cloid,
+                oid: Some(OrderId(oid)),
+                status: "resting".into(),
+                error: None,
+            });
+        } else if let Some(filled) = status.get("filled") {
+            let oid = filled
+                .get("oid")
+                .and_then(|o| o.as_u64())
+                .ok_or_else(|| HlError::InvalidResponse("filled.oid missing".into()))?;
+            out.push(OrderResponse {
+                cloid,
+                oid: Some(OrderId(oid)),
+                status: "filled".into(),
+                error: None,
+            });
+        } else if let Some(err) = status.get("error") {
+            let msg = err.as_str().unwrap_or("(no msg)");
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "error".into(),
+                error: Some(msg.into()),
+            });
+        } else {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "unknown".into(),
+                error: Some(format!("unknown status shape: {status}")),
+            });
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
