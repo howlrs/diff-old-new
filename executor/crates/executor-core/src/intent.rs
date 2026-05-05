@@ -69,6 +69,11 @@ impl AlgoParams {
 }
 
 /// One order to be sent (pre-batch). Algorithms enqueue these to the BatchSender.
+///
+/// PR-C1: domain type only. HL universe asset index is resolved inside
+/// `executor_hl::hl_client::RealHlClient` via `MetaCache` (built once at server
+/// startup). Algorithms emit `OrderIntent` referencing only `symbol`; the wire
+/// layer translates to the HL `a: u32` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderIntent {
     pub cloid: Cloid,
@@ -81,6 +86,8 @@ pub struct OrderIntent {
 }
 
 /// One cancel request (pre-batch).
+///
+/// PR-C1: domain type only — see `OrderIntent` for asset resolution policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelIntent {
     pub symbol: Symbol,

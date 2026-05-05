@@ -13,7 +13,7 @@ jobs:
   python:
     name: python (lint + type + test)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -41,10 +41,33 @@ jobs:
         run: mypy src
         continue-on-error: true  # Phase 1: warning として記録, Phase 2 で strict 必須化
 
-      - name: Pytest
+      # PR-C4 (2026-05-05): the slow-marked Python e2e tests in
+      # tests/test_executor_client_live.py spawn the Rust executor-server
+      # in mock mode. Build it (release profile) once before pytest so the
+      # `running_server` fixture finds the binary.
+      - name: Install Rust toolchain (for e2e binary)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (e2e build)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            executor/target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('executor/Cargo.lock', 'executor/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-e2e-
+            ${{ runner.os }}-cargo-
+
+      - name: Build executor-server (release) for e2e
+        working-directory: executor
+        run: cargo build --release -p executor-server
+
+      - name: Pytest (incl. mock e2e via executor-server)
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: pytest -q -m "not live and not slow" --cov=src --cov-report=term-missing
+        run: pytest -q -m "not live" --cov=src --cov-report=term-missing
 
   rust:
     name: rust (fmt + clippy + test)
@@ -79,4 +102,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --all-features
+        # NOTE: --all-features intentionally avoided. The executor-hl `live`
+        # feature hits real Hyperliquid mainnet /info and would burn rate
+        # limit / leak the test EOA in CI logs. Run `cargo test -p executor-hl
+        # --features live` locally with HL_TEST_ADDRESS set when needed.
+        run: cargo test --workspace

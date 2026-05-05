@@ -4,7 +4,7 @@
 //! 内部の EIP-712 sign + `/exchange` POST は次フェーズで実装 (鍵管理 ブレスト後).
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,15 +46,74 @@ impl HlConfig {
     }
 }
 
-/// Account-level snapshot returned by `/info clearinghouseState` (subset).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Account-level snapshot returned by `/info clearinghouseState`.
+///
+/// HL returns numeric values as JSON strings; this struct holds them as
+/// `Decimal` after `from_wire` mapping. `address` is the master EOA the
+/// snapshot was fetched for; `server_time` is HL's snapshot timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountStateSnapshot {
-    pub address: Option<Address>,
-    pub margin_used: Option<Decimal>,
-    pub account_value: Option<Decimal>,
+    pub address: Address,
+    pub margin_used: Decimal,
+    pub account_value: Decimal,
+    pub withdrawable: Decimal,
+    pub cross_maintenance_margin_used: Decimal,
     pub positions: HashMap<Symbol, Position>,
     pub open_orders_by_cloid: HashMap<Cloid, OrderId>,
     pub fetched_at: DateTime<Utc>,
+    pub server_time: DateTime<Utc>,
+}
+
+impl AccountStateSnapshot {
+    /// Map the wire representation into the domain snapshot.
+    pub fn from_wire(address: Address, wire: &crate::wire::WireClearinghouseState) -> Self {
+        let now = Utc::now();
+        let server_time = chrono::Utc
+            .timestamp_millis_opt(wire.time as i64)
+            .single()
+            .unwrap_or(now);
+        let mut positions = HashMap::new();
+        for ap in &wire.asset_positions {
+            let p = &ap.position;
+            positions.insert(
+                Symbol::new(&p.coin),
+                Position {
+                    size: p.szi,
+                    entry_px: Some(p.entry_px),
+                    unrealized_pnl: Some(p.unrealized_pnl),
+                    margin_used: Some(p.margin_used),
+                    last_update: Some(server_time),
+                },
+            );
+        }
+        Self {
+            address,
+            margin_used: wire.margin_summary.total_margin_used,
+            account_value: wire.margin_summary.account_value,
+            withdrawable: wire.withdrawable,
+            cross_maintenance_margin_used: wire.cross_maintenance_margin_used,
+            positions,
+            open_orders_by_cloid: HashMap::new(),
+            fetched_at: now,
+            server_time,
+        }
+    }
+
+    /// Empty snapshot for tests/mocks where no real data is needed yet.
+    pub fn empty(address: Address) -> Self {
+        let now = Utc::now();
+        Self {
+            address,
+            margin_used: Decimal::ZERO,
+            account_value: Decimal::ZERO,
+            withdrawable: Decimal::ZERO,
+            cross_maintenance_margin_used: Decimal::ZERO,
+            positions: HashMap::new(),
+            open_orders_by_cloid: HashMap::new(),
+            fetched_at: now,
+            server_time: now,
+        }
+    }
 }
 
 /// Place-order response.
@@ -66,25 +125,129 @@ pub struct OrderResponse {
     pub error: Option<String>,
 }
 
+/// Domain-level open order (one HL `openOrders` entry mapped to local types).
+///
+/// We keep the wire `oid` and translate side into `executor_core::types::Side`
+/// for callers; cloid is unknown from `openOrders` alone (HL does not echo it
+/// in this endpoint), so it stays None until matched with local registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HlOpenOrder {
+    pub symbol: Symbol,
+    pub side: executor_core::types::Side,
+    pub limit_px: Decimal,
+    pub sz: Decimal,
+    pub oid: OrderId,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl HlOpenOrder {
+    pub fn from_wire(w: &crate::wire::WireOpenOrder) -> Self {
+        use crate::wire::WireOrderSide;
+        let side = match w.side {
+            WireOrderSide::A => executor_core::types::Side::Short, // ask = sell
+            WireOrderSide::B => executor_core::types::Side::Long,  // bid = buy
+        };
+        let ts = chrono::Utc
+            .timestamp_millis_opt(w.timestamp)
+            .single()
+            .unwrap_or_else(Utc::now);
+        Self {
+            symbol: Symbol::new(&w.coin),
+            side,
+            limit_px: w.limit_px,
+            sz: w.sz,
+            oid: OrderId(w.oid),
+            timestamp: ts,
+        }
+    }
+}
+
+/// HL `userRole` mapped to a Rust enum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    User,
+    Agent { master: Address },
+    Vault,
+    SubAccount,
+    Missing,
+}
+
+/// Catch-all for HL roles we don't know yet (forward compatibility).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnknownRole(pub String);
+
+impl Role {
+    pub fn from_wire(w: &crate::wire::WireUserRole) -> Self {
+        use crate::wire::{WireUserRole as W, WireUserRoleTagged as T};
+        match w {
+            W::Tagged(t) => match t {
+                T::User => Role::User,
+                T::Agent { data } => Role::Agent {
+                    master: Address::new(&data.user),
+                },
+                T::Vault => Role::Vault,
+                T::SubAccount => Role::SubAccount,
+                T::Missing => Role::Missing,
+            },
+            // Unknown JSON value (e.g. `{"role":"marketMaker"}`) — preserve it
+            // as Missing so callers don't crash but behavior matches the
+            // safest known variant.
+            W::Unknown(_) => Role::Missing,
+        }
+    }
+}
+
 #[async_trait]
 pub trait HlClient: Send + Sync {
-    /// Fetch full account state (positions, open orders, margin).
-    async fn fetch_account_state(&self, address: &Address)
-        -> Result<AccountStateSnapshot, HlError>;
+    /// Fetch full account state. `dex=None` selects the default perp dex;
+    /// `dex=Some("xyz")` etc. selects a HIP-3 builder dex.
+    async fn fetch_account_state(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<AccountStateSnapshot, HlError>;
 
-    /// Fetch a fresh top-N book snapshot (for state init / reconciliation).
+    /// Fetch a fresh top-N book snapshot.
     async fn fetch_book_snapshot(&self, symbol: &Symbol) -> Result<OrderBook, HlError>;
 
-    /// Place a batch of orders. Returns per-cloid response.
+    /// Fetch all open orders for the address (default dex unless specified).
+    async fn fetch_open_orders(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError>;
+
+    /// Fetch the perp universe metadata (symbol list + leverage caps).
+    async fn fetch_meta(&self, dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError>;
+
+    /// Identify the role of an address (catches agent/master mix-ups).
+    async fn fetch_user_role(&self, address: &Address) -> Result<Role, HlError>;
+
+    /// Place a batch of orders.
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError>;
 
-    /// Cancel a batch of orders by cloid (preferred) or oid.
+    /// Cancel a batch of orders.
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError>;
+
+    /// PR-D1: REST polling fallback for `userFills`. Used by the WS subscriber
+    /// supervisor when the live WS stream is unavailable.
+    ///
+    /// `start_ms` / `end_ms` are inclusive milli-epoch bounds. `end_ms = None`
+    /// means "now". HL applies its own server-side cap on result size; callers
+    /// should advance `start_ms` past the highest `time` they already saw to
+    /// avoid duplicate retrieval (the in-process [`crate::ws_state::WsStateManager`]
+    /// also dedupes on `(oid, tid)` so duplicates are safe but wasteful).
+    async fn fetch_user_fills_by_time(
+        &self,
+        agent: &Address,
+        start_ms: u64,
+        end_ms: Option<u64>,
+    ) -> Result<Vec<crate::wire_ws::WireWsFill>, HlError>;
 }
 
 /// `MockHlClient` records calls in memory and returns Ok responses. Used for
 /// the 80 % prototype, unit tests, and integration tests with no key.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MockHlClient {
     placed: Mutex<Vec<Vec<OrderIntent>>>,
     cancelled: Mutex<Vec<Vec<CancelIntent>>>,
@@ -92,6 +255,24 @@ pub struct MockHlClient {
     pub account: Mutex<AccountStateSnapshot>,
     /// Pre-seeded book per symbol.
     pub books: Mutex<HashMap<Symbol, OrderBook>>,
+    /// PR-C3: when `true`, `fetch_account_state` returns
+    /// `Err(HlError::Network)` so guard tests can exercise consecutive-error
+    /// counting. Set via `set_fail_account_state`.
+    fail_account_state: std::sync::atomic::AtomicBool,
+}
+
+impl Default for MockHlClient {
+    fn default() -> Self {
+        Self {
+            placed: Mutex::new(Vec::new()),
+            cancelled: Mutex::new(Vec::new()),
+            account: Mutex::new(AccountStateSnapshot::empty(Address::new(
+                "0x0000000000000000000000000000000000000000",
+            ))),
+            books: Mutex::new(HashMap::new()),
+            fail_account_state: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 impl MockHlClient {
@@ -118,15 +299,36 @@ impl MockHlClient {
             *g = snap;
         }
     }
+
+    /// PR-C3: control whether `fetch_account_state` returns an error.
+    /// Tests for the BaselineGuard's consecutive-error counter call this with
+    /// `true` to simulate transient network failures.
+    pub fn set_fail_account_state(&self, fail: bool) {
+        self.fail_account_state
+            .store(fail, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[async_trait]
 impl HlClient for MockHlClient {
     async fn fetch_account_state(
         &self,
-        _address: &Address,
+        address: &Address,
+        _dex: Option<&str>,
     ) -> Result<AccountStateSnapshot, HlError> {
-        let snap = self.account.lock().map(|g| g.clone()).unwrap_or_default();
+        if self
+            .fail_account_state
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(HlError::Network(
+                "mock: fetch_account_state forced failure".into(),
+            ));
+        }
+        let snap = self
+            .account
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| AccountStateSnapshot::empty(address.clone()));
         Ok(snap)
     }
 
@@ -139,6 +341,24 @@ impl HlClient for MockHlClient {
             .get(symbol)
             .cloned()
             .ok_or_else(|| HlError::InvalidResponse(format!("no seeded book for {symbol}")))
+    }
+
+    async fn fetch_open_orders(
+        &self,
+        _address: &Address,
+        _dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch_meta(&self, _dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError> {
+        Ok(crate::wire::WireMeta {
+            universe: Vec::new(),
+        })
+    }
+
+    async fn fetch_user_role(&self, _address: &Address) -> Result<Role, HlError> {
+        Ok(Role::User)
     }
 
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError> {
@@ -173,6 +393,17 @@ impl HlClient for MockHlClient {
             .collect();
         Ok(resp)
     }
+
+    async fn fetch_user_fills_by_time(
+        &self,
+        _agent: &Address,
+        _start_ms: u64,
+        _end_ms: Option<u64>,
+    ) -> Result<Vec<crate::wire_ws::WireWsFill>, HlError> {
+        // Mock returns empty by default; tests can extend later if a fixture
+        // is needed for the REST fallback path.
+        Ok(Vec::new())
+    }
 }
 
 /// 擬似 oid (mock 用).
@@ -191,10 +422,18 @@ pub struct RealHlClient {
     pub signer: Arc<dyn Signer>,
     pub rate_limiter: Arc<TokenBucket>,
     pub http: reqwest::Client,
+    /// PR-C1: pre-built symbol → asset cache. `RealHlClient::bootstrap()`
+    /// initializes this empty so `fetch_meta()` can be called to BUILD the
+    /// cache; `with_meta()` upgrades it. After `with_meta`, this is the
+    /// authoritative source for asset resolution in place/cancel.
+    pub meta: Arc<crate::meta::MetaCache>,
 }
 
 impl RealHlClient {
-    pub fn new(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
+    /// Construct a client with an EMPTY MetaCache. Use this when you need
+    /// to call `fetch_meta()` to build the real cache; afterward, call
+    /// `with_meta()` to produce a production-ready client.
+    pub fn bootstrap(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
         let http = reqwest::Client::builder()
             .pool_idle_timeout(Some(std::time::Duration::from_secs(60)))
             .timeout(std::time::Duration::from_secs(10))
@@ -205,7 +444,90 @@ impl RealHlClient {
             signer,
             rate_limiter: Arc::new(TokenBucket::hyperliquid_default()),
             http,
+            meta: Arc::new(crate::meta::MetaCache::empty()),
         }
+    }
+
+    /// Replace the MetaCache. Returns a new `RealHlClient` reusing the
+    /// existing http/signer/rate_limiter. Call this after building the cache.
+    pub fn with_meta(self, meta: Arc<crate::meta::MetaCache>) -> Self {
+        Self { meta, ..self }
+    }
+
+    /// Backwards-compatible alias. Existing callers used `new(config, signer)`
+    /// with the implicit assumption that meta would be filled in later.
+    /// New code should use [`connect_async`] (preferred) or
+    /// `bootstrap` + `with_meta` explicitly.
+    pub fn new(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
+        Self::bootstrap(config, signer)
+    }
+
+    /// Production factory: bootstrap → MetaCache::build → with_meta in one call.
+    /// Returns a fully-initialized client with a populated MetaCache so callers
+    /// don't have to reproduce the 2-step dance and risk forgetting `with_meta`.
+    /// `dexes = &[None]` covers default perp dex; pass `&[None, Some("xyz")]`
+    /// etc. for HIP-3 builder dexes.
+    pub async fn connect_async(
+        config: HlConfig,
+        signer: Arc<dyn Signer>,
+        dexes: &[Option<&str>],
+    ) -> Result<Self, HlError> {
+        let bootstrap = Self::bootstrap(config, signer);
+        let meta = std::sync::Arc::new(crate::meta::MetaCache::build(&bootstrap, dexes).await?);
+        Ok(bootstrap.with_meta(meta))
+    }
+
+    /// Resolve a symbol to its asset index using the cached meta.
+    /// Used by both `place_orders` and `cancel_orders` (Task 6).
+    pub(crate) fn resolve_asset(
+        &self,
+        symbol: &executor_core::symbol::Symbol,
+    ) -> Result<u32, HlError> {
+        self.meta.resolve(symbol)
+    }
+
+    /// POST a JSON body to the /info endpoint and return the response body as a String.
+    /// Maps non-2xx into `HlError::Network` with the response body included so
+    /// HL's JSON error detail (e.g. "Unknown dex", rate-limit reason) is
+    /// preserved for diagnosis.
+    async fn post_info(&self, body: &serde_json::Value) -> Result<String, HlError> {
+        let resp = self
+            .http
+            .post(&self.config.info_url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        if !status.is_success() {
+            return Err(HlError::Network(format!("HTTP {status}: {text}")));
+        }
+        Ok(text)
+    }
+
+    /// POST a JSON body to the /exchange endpoint and return the response body.
+    /// Mirrors `post_info` but targets `config.exchange_url`.
+    async fn post_exchange(&self, body: &serde_json::Value) -> Result<String, HlError> {
+        let resp = self
+            .http
+            .post(&self.config.exchange_url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        if !status.is_success() {
+            return Err(HlError::Network(format!("HTTP {status}: {text}")));
+        }
+        Ok(text)
     }
 }
 
@@ -214,83 +536,447 @@ impl HlClient for RealHlClient {
     async fn fetch_account_state(
         &self,
         address: &Address,
+        dex: Option<&str>,
     ) -> Result<AccountStateSnapshot, HlError> {
         let _wait = self.rate_limiter.acquire(2).await;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "type": "clearinghouseState",
             "user": address.as_str(),
         });
-        let resp = self
-            .http
-            .post(&self.config.info_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HlError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(HlError::Network(format!("HTTP {}", resp.status())));
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
         }
-        // Phase 3.5+ で完全なパースを実装. 80% プロトでは骨格のみ.
-        Ok(AccountStateSnapshot {
-            address: Some(address.clone()),
-            fetched_at: Utc::now(),
-            ..Default::default()
-        })
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireClearinghouseState = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("clearinghouseState: {e}")))?;
+        Ok(AccountStateSnapshot::from_wire(address.clone(), &wire))
     }
 
     async fn fetch_book_snapshot(&self, symbol: &Symbol) -> Result<OrderBook, HlError> {
-        let _wait = self.rate_limiter.acquire(1).await;
+        let _wait = self.rate_limiter.acquire(2).await;
         let body = serde_json::json!({
             "type": "l2Book",
             "coin": symbol.as_str(),
         });
-        let resp = self
-            .http
-            .post(&self.config.info_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HlError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(HlError::Network(format!("HTTP {}", resp.status())));
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireL2Book = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("l2Book: {e}")))?;
+        Ok(wire.to_orderbook())
+    }
+
+    async fn fetch_open_orders(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let mut body = serde_json::json!({
+            "type": "openOrders",
+            "user": address.as_str(),
+        });
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
         }
-        // 80% プロト: 空 book を返す. 実装は次 PR で詳細化.
-        Ok(OrderBook::default())
+        let resp = self.post_info(&body).await?;
+        let wire: Vec<crate::wire::WireOpenOrder> = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("openOrders: {e}")))?;
+        Ok(wire.iter().map(HlOpenOrder::from_wire).collect())
+    }
+
+    async fn fetch_meta(&self, dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let mut body = serde_json::json!({"type": "meta"});
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
+        }
+        let resp = self.post_info(&body).await?;
+        serde_json::from_str(&resp).map_err(|e| HlError::InvalidResponse(format!("meta: {e}")))
+    }
+
+    async fn fetch_user_role(&self, address: &Address) -> Result<Role, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let body = serde_json::json!({
+            "type": "userRole",
+            "user": address.as_str(),
+        });
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireUserRole = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("userRole: {e}")))?;
+        Ok(Role::from_wire(&wire))
     }
 
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError> {
-        // 80% プロト: signer + rate_limiter の枠だけ通す. 実 POST は鍵管理ブレスト後.
         if orders.is_empty() {
-            return Ok(vec![]);
+            return Ok(Vec::new());
         }
-        let _wait = self.rate_limiter.acquire(orders.len() as u32).await;
 
-        // sign for nonce visibility (no real submission).
+        let weight = 1 + (orders.len() as u32 / 40);
+        let _wait = self.rate_limiter.acquire(weight).await;
+
+        // Resolve each intent's asset; collect resolved (idx, wire) pairs and
+        // immediately-rejected (idx, error_response) pairs so the final output
+        // matches the input order exactly. UnknownSymbol drops a single order;
+        // other Err variants abort the whole batch.
+        let mut responses: Vec<Option<OrderResponse>> = (0..orders.len()).map(|_| None).collect();
+        let mut wires_with_idx: Vec<(usize, crate::eip712::OrderWire)> =
+            Vec::with_capacity(orders.len());
+        for (i, intent) in orders.iter().enumerate() {
+            match self.resolve_asset(&intent.symbol) {
+                Ok(asset) => {
+                    wires_with_idx.push((i, crate::eip712::order_intent_to_wire(intent, asset)));
+                }
+                Err(HlError::UnknownSymbol(sym)) => {
+                    tracing::error!(symbol = %sym, "place_orders: unknown symbol; dropping");
+                    responses[i] = Some(OrderResponse {
+                        cloid: intent.cloid,
+                        oid: None,
+                        status: "error".into(),
+                        error: Some(format!("unknown symbol: {sym}")),
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        if wires_with_idx.is_empty() {
+            return unwrap_response_slots(responses);
+        }
+
+        let order_wires: Vec<crate::eip712::OrderWire> =
+            wires_with_idx.iter().map(|(_, w)| w.clone()).collect();
+        let action = crate::eip712::OrderAction {
+            action_type: "order".into(),
+            orders: order_wires,
+            grouping: "na".into(),
+        };
+        let action_value = serde_json::to_value(&action)
+            .map_err(|e| HlError::ActionFormat(format!("order serialize: {e}")))?;
+
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or_default();
-        let action = serde_json::json!({"type": "order", "orders": orders.len()});
-        let _sig = self.signer.sign_l1(&action, nonce).await?;
 
-        Err(HlError::Exchange {
-            code: Some("not_implemented".into()),
-            message: "RealHlClient::place_orders is the 80% scaffold; \
-                      full HL signing arrives with the key-management PR"
-                .into(),
-        })
+        let sig = self.signer.sign_l1(&action_value, nonce, None).await?;
+
+        let body = serde_json::json!({
+            "action": action,
+            "nonce": nonce,
+            "signature": sig,
+            "vaultAddress": serde_json::Value::Null,
+        });
+
+        let resp_text = self.post_exchange(&body).await?;
+
+        // Parse only the orders that were actually sent. Build a Vec<OrderIntent>
+        // matching wires_with_idx order so parse_exchange_response can attribute
+        // each parsed status to the originating intent's cloid.
+        let sent_intents_owned: Vec<OrderIntent> = wires_with_idx
+            .iter()
+            .map(|(i, _)| orders[*i].clone())
+            .collect();
+        let parsed = parse_exchange_response(&resp_text, &sent_intents_owned)?;
+
+        for ((i, _), resp) in wires_with_idx.iter().zip(parsed) {
+            responses[*i] = Some(resp);
+        }
+
+        unwrap_response_slots(responses)
     }
 
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError> {
         if cancels.is_empty() {
-            return Ok(vec![]);
+            return Ok(Vec::new());
         }
-        let _wait = self.rate_limiter.acquire(cancels.len() as u32).await;
-        Err(HlError::Exchange {
-            code: Some("not_implemented".into()),
-            message: "RealHlClient::cancel_orders scaffold (see place_orders).".into(),
-        })
+
+        let weight = 1 + (cancels.len() as u32 / 40);
+        let _wait = self.rate_limiter.acquire(weight).await;
+
+        // Validate by_cloid presence and resolve asset per intent. Same
+        // index-preservation pattern as place_orders.
+        let mut responses: Vec<Option<OrderResponse>> = (0..cancels.len()).map(|_| None).collect();
+        let mut wires_with_idx: Vec<(usize, crate::eip712::CancelByCloidWire)> =
+            Vec::with_capacity(cancels.len());
+        for (i, c) in cancels.iter().enumerate() {
+            // by_oid-only is still rejected (PR-B2a contract; PR-B2b
+            // emergency_stop fix accepts by_cloid + by_oid, using cloid).
+            let cloid = match c.by_cloid {
+                Some(cl) => cl,
+                None => {
+                    return Err(HlError::ActionFormat(
+                        "by_oid-only cancel not supported in PR-B2a; CancelIntent must \
+                         include by_cloid (PR-B2b will add by_oid path)"
+                            .into(),
+                    ));
+                }
+            };
+            match self.resolve_asset(&c.symbol) {
+                Ok(asset) => {
+                    wires_with_idx.push((
+                        i,
+                        crate::eip712::CancelByCloidWire {
+                            asset,
+                            cloid: format!("{cloid}"),
+                        },
+                    ));
+                }
+                Err(HlError::UnknownSymbol(sym)) => {
+                    tracing::error!(symbol = %sym, "cancel_orders: unknown symbol; dropping");
+                    responses[i] = Some(OrderResponse {
+                        cloid,
+                        oid: None,
+                        status: "error".into(),
+                        error: Some(format!("unknown symbol: {sym}")),
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        if wires_with_idx.is_empty() {
+            return unwrap_response_slots(responses);
+        }
+
+        let cancel_wires: Vec<crate::eip712::CancelByCloidWire> =
+            wires_with_idx.iter().map(|(_, w)| w.clone()).collect();
+        let action = crate::eip712::CancelByCloidAction {
+            action_type: "cancelByCloid".into(),
+            cancels: cancel_wires,
+        };
+        let action_value = serde_json::to_value(&action)
+            .map_err(|e| HlError::ActionFormat(format!("cancel serialize: {e}")))?;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default();
+
+        let sig = self.signer.sign_l1(&action_value, nonce, None).await?;
+
+        let body = serde_json::json!({
+            "action": action,
+            "nonce": nonce,
+            "signature": sig,
+            "vaultAddress": serde_json::Value::Null,
+        });
+
+        let resp_text = self.post_exchange(&body).await?;
+
+        let sent_cancels_owned: Vec<CancelIntent> = wires_with_idx
+            .iter()
+            .map(|(i, _)| cancels[*i].clone())
+            .collect();
+        let parsed = parse_cancel_response(&resp_text, &sent_cancels_owned)?;
+
+        for ((i, _), resp) in wires_with_idx.iter().zip(parsed) {
+            responses[*i] = Some(resp);
+        }
+
+        unwrap_response_slots(responses)
     }
+
+    async fn fetch_user_fills_by_time(
+        &self,
+        agent: &Address,
+        start_ms: u64,
+        end_ms: Option<u64>,
+    ) -> Result<Vec<crate::wire_ws::WireWsFill>, HlError> {
+        // HL info weight: ~20 (similar to other user-scoped queries).
+        let _wait = self.rate_limiter.acquire(20).await;
+        let mut body = serde_json::json!({
+            "type": "userFillsByTime",
+            "user": agent.as_str(),
+            "startTime": start_ms,
+        });
+        if let Some(end) = end_ms {
+            body["endTime"] = serde_json::Value::Number(end.into());
+        }
+        let resp = self.post_info(&body).await?;
+        let fills: Vec<crate::wire_ws::WireWsFill> = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("userFillsByTime: {e}")))?;
+        Ok(fills)
+    }
+}
+
+/// Parse HL `/exchange` response for an order action into per-order `OrderResponse`.
+///
+/// Recognized status shapes per element of `response.data.statuses`:
+/// - `{"resting": {"oid": <u64>}}` -> status="resting"
+/// - `{"filled": {"oid": <u64>, "totalSz": "...", "avgPx": "..."}}` -> status="filled"
+/// - `{"error": "<msg>"}` -> status="error"
+///
+/// Render a `serde_json::Value` as a human-readable error string.
+/// Strings are emitted verbatim; objects/arrays are rendered as compact JSON
+/// so the diagnostic detail is preserved instead of being collapsed to "(no msg)".
+fn json_to_err_string(v: &serde_json::Value) -> String {
+    if let Some(s) = v.as_str() {
+        s.to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+/// Collapse `Vec<Option<OrderResponse>>` into `Vec<OrderResponse>` while
+/// fail-fast on any unexpected `None` slot. After place_orders/cancel_orders
+/// rebuild responses by index, every slot MUST be populated; a `None` would
+/// indicate an internal bug (mismatched parsed length, etc.) and we surface
+/// it as `HlError::InvalidResponse` rather than silently shrinking the output.
+fn unwrap_response_slots(
+    responses: Vec<Option<OrderResponse>>,
+) -> Result<Vec<OrderResponse>, HlError> {
+    let n = responses.len();
+    let mut out = Vec::with_capacity(n);
+    for (i, slot) in responses.into_iter().enumerate() {
+        match slot {
+            Some(r) => out.push(r),
+            None => {
+                return Err(HlError::InvalidResponse(format!(
+                    "internal: response slot {i} of {n} unfilled (parse vs input length mismatch?)"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Top-level `{"status":"err", "response": "<msg>"}` returns `Err(HlError::Exchange)`.
+fn parse_exchange_response(
+    text: &str,
+    orders: &[OrderIntent],
+) -> Result<Vec<OrderResponse>, HlError> {
+    let v: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| HlError::InvalidResponse(format!("parse exchange json: {e}")))?;
+
+    if v.get("status").and_then(|s| s.as_str()) == Some("err") {
+        let msg = v
+            .get("response")
+            .map(json_to_err_string)
+            .unwrap_or_else(|| "(no msg)".into());
+        return Err(HlError::Exchange {
+            code: Some("top_level_err".into()),
+            message: msg,
+        });
+    }
+
+    let statuses = v
+        .pointer("/response/data/statuses")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| HlError::InvalidResponse("statuses missing".into()))?;
+
+    if statuses.len() != orders.len() {
+        return Err(HlError::InvalidResponse(format!(
+            "statuses len {} != orders len {}",
+            statuses.len(),
+            orders.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(statuses.len());
+    for (status, intent) in statuses.iter().zip(orders.iter()) {
+        let cloid = intent.cloid;
+        if let Some(resting) = status.get("resting") {
+            let oid = resting
+                .get("oid")
+                .and_then(|o| o.as_u64())
+                .ok_or_else(|| HlError::InvalidResponse("resting.oid missing".into()))?;
+            out.push(OrderResponse {
+                cloid,
+                oid: Some(OrderId(oid)),
+                status: "resting".into(),
+                error: None,
+            });
+        } else if let Some(filled) = status.get("filled") {
+            let oid = filled
+                .get("oid")
+                .and_then(|o| o.as_u64())
+                .ok_or_else(|| HlError::InvalidResponse("filled.oid missing".into()))?;
+            out.push(OrderResponse {
+                cloid,
+                oid: Some(OrderId(oid)),
+                status: "filled".into(),
+                error: None,
+            });
+        } else if let Some(err) = status.get("error") {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "error".into(),
+                error: Some(json_to_err_string(err)),
+            });
+        } else {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "unknown".into(),
+                error: Some(format!("unknown status shape: {status}")),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Parse HL `/exchange` response for a cancelByCloid action.
+///
+/// HL returns cancel success as the bare string `"success"` (NOT an object,
+/// unlike order responses). Per-cancel error is `{"error": "<msg>"}`.
+fn parse_cancel_response(
+    text: &str,
+    cancels: &[CancelIntent],
+) -> Result<Vec<OrderResponse>, HlError> {
+    let v: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| HlError::InvalidResponse(format!("parse cancel json: {e}")))?;
+
+    if v.get("status").and_then(|s| s.as_str()) == Some("err") {
+        let msg = v
+            .get("response")
+            .map(json_to_err_string)
+            .unwrap_or_else(|| "(no msg)".into());
+        return Err(HlError::Exchange {
+            code: Some("top_level_err".into()),
+            message: msg,
+        });
+    }
+
+    let statuses = v
+        .pointer("/response/data/statuses")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| HlError::InvalidResponse("cancel statuses missing".into()))?;
+
+    if statuses.len() != cancels.len() {
+        return Err(HlError::InvalidResponse(format!(
+            "cancel statuses len {} != cancels len {}",
+            statuses.len(),
+            cancels.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(statuses.len());
+    for (status, intent) in statuses.iter().zip(cancels.iter()) {
+        let cloid = intent.by_cloid.unwrap_or_default();
+        if status.as_str() == Some("success") {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "cancelled".into(),
+                error: None,
+            });
+        } else if let Some(err) = status.get("error") {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "error".into(),
+                error: Some(json_to_err_string(err)),
+            });
+        } else {
+            out.push(OrderResponse {
+                cloid,
+                oid: None,
+                status: "unknown".into(),
+                error: Some(format!("unknown cancel status shape: {status}")),
+            });
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

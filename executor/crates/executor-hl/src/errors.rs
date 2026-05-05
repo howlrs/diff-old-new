@@ -19,6 +19,15 @@ pub enum HlError {
     #[error("invalid response: {0}")]
     InvalidResponse(String),
 
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
+
+    #[error("invalid action format: {0}")]
+    ActionFormat(String),
+
+    #[error("unknown symbol (not in MetaCache): {0}")]
+    UnknownSymbol(executor_core::symbol::Symbol),
+
     #[error("hl exchange error: {code:?} {message}")]
     Exchange {
         code: Option<String>,

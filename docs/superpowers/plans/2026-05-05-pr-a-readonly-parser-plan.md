@@ -10,11 +10,16 @@
 
 ---
 
+> **Convention update (2026-05-05, post-Task-3):**
+> Wire structs use struct-level `#[serde(rename_all = "camelCase")]` instead of per-field `#[serde(rename = "...")]`. Per-field `rename` is kept ONLY when the wire name is a Rust keyword (e.g. `"type"` → `position_type`). All `with = "rust_decimal::serde::str[_option]"` and `#[serde(default)]` attributes remain per-field. Code snippets below pre-date this convention; treat them as field-list reference, not literal copy-paste, and follow the established pattern in `wire.rs`.
+
+---
+
 ## File Structure
 
 | Path | Responsibility | Action |
 |---|---|---|
-| `executor/crates/executor-hl/src/wire.rs` | NEW. HL `/info` JSON wire structs (`InfoClearinghouseState`, `WirePosition`, `WireLeverage`, `WireOpenOrder`, `WireL2Book`, `WireMeta`, `WireUserRole` etc.). Pure data, no logic. | Create |
+| `executor/crates/executor-hl/src/wire.rs` | NEW. HL `/info` JSON wire structs (`WireClearinghouseState`, `WirePosition`, `WireLeverage`, `WireOpenOrder`, `WireL2Book`, `WireMeta`, `WireUserRole` etc.). Pure data, no logic. | Create |
 | `executor/crates/executor-hl/src/hl_client.rs` | Extend `AccountStateSnapshot`, add `LeverageSnapshot`, add `OpenOrder` (renamed `HlOpenOrder` to avoid collision with `executor-core::state::OpenOrder`), add `Role` enum, extend `HlClient` trait with `fetch_open_orders` / `fetch_meta` / `fetch_user_role` and an optional `dex: Option<&str>` arg on `fetch_account_state`. Implement `RealHlClient` parsing for all four endpoints. Update `MockHlClient` accordingly. | Modify |
 | `executor/crates/executor-hl/src/lib.rs` | Re-export `wire` module (pub) and new public types from `hl_client`. | Modify |
 | `executor/crates/executor-hl/tests/fixtures/info/` | NEW. Sanitized JSON fixtures captured from mainnet. | Create |
@@ -222,7 +227,7 @@ Create `executor/crates/executor-hl/tests/parse_clearinghouse_state.rs`:
 ```rust
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use executor_hl::wire::{InfoClearinghouseState, WireLeverageType};
+use executor_hl::wire::{WireClearinghouseState, WireLeverageType};
 use rust_decimal_macros::dec;
 use std::path::PathBuf;
 
@@ -236,7 +241,7 @@ fn fixture(name: &str) -> String {
 #[test]
 fn parses_default_dex_with_one_position() {
     let json = fixture("clearinghouse_state_default.json");
-    let s: InfoClearinghouseState = serde_json::from_str(&json).expect("parse default");
+    let s: WireClearinghouseState = serde_json::from_str(&json).expect("parse default");
 
     // Top-level
     assert_eq!(s.margin_summary.account_value, dec!(643.718581));
@@ -265,7 +270,7 @@ fn parses_default_dex_with_one_position() {
 #[test]
 fn parses_xyz_dex_with_one_position() {
     let json = fixture("clearinghouse_state_xyz.json");
-    let s: InfoClearinghouseState = serde_json::from_str(&json).expect("parse xyz");
+    let s: WireClearinghouseState = serde_json::from_str(&json).expect("parse xyz");
     assert_eq!(s.asset_positions.len(), 1);
     assert_eq!(s.asset_positions[0].position.coin, "xyz:META");
     assert_eq!(s.asset_positions[0].position.szi, dec!(3.262));
@@ -274,7 +279,7 @@ fn parses_xyz_dex_with_one_position() {
 #[test]
 fn parses_empty_account() {
     let json = fixture("clearinghouse_state_empty.json");
-    let s: InfoClearinghouseState = serde_json::from_str(&json).expect("parse empty");
+    let s: WireClearinghouseState = serde_json::from_str(&json).expect("parse empty");
     assert_eq!(s.asset_positions.len(), 0);
     assert_eq!(s.withdrawable, dec!(0));
     assert_eq!(s.margin_summary.account_value, dec!(0));
@@ -286,7 +291,7 @@ fn parses_empty_account() {
 Run: `cd executor && cargo test -p executor-hl --test parse_clearinghouse_state 2>&1 | head -30`
 Expected: compile error `unresolved import executor_hl::wire`.
 
-- [ ] **Step 3.3: Implement `wire.rs` with `InfoClearinghouseState` and friends**
+- [ ] **Step 3.3: Implement `wire.rs` with `WireClearinghouseState` and friends**
 
 Create `executor/crates/executor-hl/src/wire.rs`:
 
@@ -305,7 +310,7 @@ use serde::{Deserialize, Serialize};
 
 /// HL `clearinghouseState` response (perp).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct InfoClearinghouseState {
+pub struct WireClearinghouseState {
     #[serde(rename = "marginSummary")]
     pub margin_summary: WireMarginSummary,
     #[serde(rename = "crossMarginSummary")]
@@ -870,7 +875,7 @@ use executor_hl::AccountStateSnapshot;
 #[test]
 fn maps_wire_into_account_state_snapshot() {
     let json = fixture("clearinghouse_state_default.json");
-    let wire: InfoClearinghouseState = serde_json::from_str(&json).unwrap();
+    let wire: WireClearinghouseState = serde_json::from_str(&json).unwrap();
 
     let addr = Address::new("0x000000000000000000000000000000000000dead");
     let snap = AccountStateSnapshot::from_wire(addr.clone(), &wire);
@@ -919,7 +924,7 @@ pub struct AccountStateSnapshot {
 
 impl AccountStateSnapshot {
     /// Map the wire representation into the domain snapshot.
-    pub fn from_wire(address: Address, wire: &crate::wire::InfoClearinghouseState) -> Self {
+    pub fn from_wire(address: Address, wire: &crate::wire::WireClearinghouseState) -> Self {
         let now = Utc::now();
         let server_time =
             chrono::Utc.timestamp_millis_opt(wire.time as i64).single().unwrap_or(now);
@@ -1197,7 +1202,7 @@ impl HlClient for RealHlClient {
             body["dex"] = serde_json::Value::String(d.to_string());
         }
         let resp = self.post_info(&body).await?;
-        let wire: crate::wire::InfoClearinghouseState = serde_json::from_str(&resp)
+        let wire: crate::wire::WireClearinghouseState = serde_json::from_str(&resp)
             .map_err(|e| HlError::InvalidResponse(format!("clearinghouseState: {e}")))?;
         Ok(AccountStateSnapshot::from_wire(address.clone(), &wire))
     }

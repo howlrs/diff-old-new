@@ -42,9 +42,21 @@ secrecy = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 
+# PR-B1: EIP-712 signer
+alloy = { workspace = true }
+rmp-serde = { workspace = true }
+hex = { workspace = true }
+
 [dev-dependencies]
 mockall = { workspace = true }
+mockito = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 rust_decimal_macros = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[features]
+default = []
+# Opt-in: hits real HL mainnet /info (read-only, no PK, no writes).
+# Skipped by default in CI. Enable with: cargo test -p executor-hl --features live
+live = []
