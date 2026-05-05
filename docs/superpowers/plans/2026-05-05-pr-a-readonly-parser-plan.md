@@ -10,6 +10,11 @@
 
 ---
 
+> **Convention update (2026-05-05, post-Task-3):**
+> Wire structs use struct-level `#[serde(rename_all = "camelCase")]` instead of per-field `#[serde(rename = "...")]`. Per-field `rename` is kept ONLY when the wire name is a Rust keyword (e.g. `"type"` → `position_type`). All `with = "rust_decimal::serde::str[_option]"` and `#[serde(default)]` attributes remain per-field. Code snippets below pre-date this convention; treat them as field-list reference, not literal copy-paste, and follow the established pattern in `wire.rs`.
+
+---
+
 ## File Structure
 
 | Path | Responsibility | Action |
