@@ -17,6 +17,7 @@ pub mod batch_sender;
 pub mod eip712;
 pub mod errors;
 pub mod hl_client;
+pub mod meta;
 pub mod rate_limiter;
 pub mod signer;
 pub mod wire;
