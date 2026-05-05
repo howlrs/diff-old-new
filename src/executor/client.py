@@ -77,8 +77,14 @@ class ExecutorClient:
             ...
     """
 
-    def __init__(self, base_url: str, timeout: float = 10.0):
+    def __init__(
+        self,
+        base_url: str,
+        operator_id: str | None = None,
+        timeout: float = 10.0,
+    ):
         self._base_url = base_url.rstrip("/")
+        self._operator_id = operator_id
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
 
@@ -179,7 +185,16 @@ class ExecutorClient:
         return self._unwrap(resp)
 
     async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        resp = await self._http.post(f"{self._base_url}{path}", json=payload)
+        # PR-C4: every POST audit-tags the caller via X-Operator-ID.
+        # GETs are read-only and intentionally untagged.
+        headers: dict[str, str] = {}
+        if self._operator_id:
+            headers["X-Operator-ID"] = self._operator_id
+        resp = await self._http.post(
+            f"{self._base_url}{path}",
+            json=payload,
+            headers=headers or None,
+        )
         return self._unwrap(resp)
 
     @staticmethod

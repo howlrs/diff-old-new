@@ -25,7 +25,11 @@ def _make_mock_transport(handler):
     return httpx.MockTransport(handler)
 
 
-def _patched_client(monkeypatch: pytest.MonkeyPatch, handler) -> ExecutorClient:
+def _patched_client(
+    monkeypatch: pytest.MonkeyPatch,
+    handler,
+    operator_id: str | None = None,
+) -> ExecutorClient:
     """Return an ExecutorClient with httpx.AsyncClient swapped for a mock."""
     transport = _make_mock_transport(handler)
     original_init = httpx.AsyncClient.__init__
@@ -35,7 +39,7 @@ def _patched_client(monkeypatch: pytest.MonkeyPatch, handler) -> ExecutorClient:
         original_init(self, *args, **kwargs)
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
-    return ExecutorClient("http://test")
+    return ExecutorClient("http://test", operator_id=operator_id)
 
 
 @pytest.mark.asyncio
@@ -192,3 +196,64 @@ async def test_client_must_be_used_as_context_manager() -> None:
     cli = ExecutorClient("http://test")
     with pytest.raises(RuntimeError):
         await cli.health()
+
+
+# ---- PR-C4: operator_id passthrough ----
+
+
+@pytest.mark.asyncio
+async def test_post_includes_operator_id_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_headers: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            seen_headers.update({k.lower(): v for k, v in req.headers.items()})
+        return httpx.Response(200, json={"aborted_executions": 0, "cancelled_orders": 0})
+
+    cli = _patched_client(monkeypatch, handler, operator_id="alice@desk")
+    async with cli:
+        await cli.emergency_stop()
+    assert seen_headers.get("x-operator-id") == "alice@desk", (
+        f"x-operator-id missing or wrong; saw: {seen_headers}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_omits_operator_id_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_headers: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            seen_headers.update({k.lower(): v for k, v in req.headers.items()})
+        return httpx.Response(200, json={"aborted_executions": 0, "cancelled_orders": 0})
+
+    cli = _patched_client(monkeypatch, handler, operator_id=None)
+    async with cli:
+        await cli.emergency_stop()
+    assert "x-operator-id" not in seen_headers, (
+        f"x-operator-id should not be present when operator_id=None; saw: {seen_headers}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_does_not_include_operator_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GETs are read-only; only POST audit-tags the caller."""
+    seen_headers: dict[str, str] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            seen_headers.update({k.lower(): v for k, v in req.headers.items()})
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "algorithms": ["market"],
+                "health": {},
+                "running_executions": 0,
+            },
+        )
+
+    cli = _patched_client(monkeypatch, handler, operator_id="alice@desk")
+    async with cli:
+        await cli.health()
+    assert "x-operator-id" not in seen_headers
