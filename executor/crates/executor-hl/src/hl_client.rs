@@ -538,6 +538,7 @@ mod tests {
         let oi = OrderIntent {
             cloid: Cloid::new(),
             symbol: Symbol::new("BTC"),
+            asset: 0,
             side: Side::Long,
             px: dec!(50000),
             sz: dec!(0.1),
@@ -550,6 +551,7 @@ mod tests {
         assert_eq!(m.placed_calls().len(), 1);
         let ci = CancelIntent {
             symbol: Symbol::new("BTC"),
+            asset: 0,
             by_cloid: Some(oi.cloid),
             by_oid: None,
         };

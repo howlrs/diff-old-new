@@ -73,6 +73,10 @@ impl AlgoParams {
 pub struct OrderIntent {
     pub cloid: Cloid,
     pub symbol: Symbol,
+    /// HL universe asset index (perp index, or 10000 + spot index). Required
+    /// at the wire layer; resolved from `symbol` via the meta cache at the
+    /// caller side (typically executor-server startup).
+    pub asset: u32,
     pub side: Side,
     pub px: Decimal,
     pub sz: Decimal,
@@ -84,6 +88,8 @@ pub struct OrderIntent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelIntent {
     pub symbol: Symbol,
+    /// HL universe asset index. Same source as `OrderIntent.asset`.
+    pub asset: u32,
     /// Either oid (exchange-returned) or cloid (client-generated). cloid preferred.
     pub by_cloid: Option<Cloid>,
     pub by_oid: Option<OrderId>,

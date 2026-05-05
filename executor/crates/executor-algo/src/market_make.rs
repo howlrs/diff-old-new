@@ -285,6 +285,8 @@ impl Algorithm for MarketMakeAlgorithm {
             if let Some(c) = q.cloid.take() {
                 let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                     symbol: ctx.symbol.clone(),
+                    // TODO(PR-B2b): resolve via meta cache (currently placeholder)
+                    asset: 0,
                     by_cloid: Some(c),
                     by_oid: None,
                 }));
@@ -386,6 +388,8 @@ impl Algorithm for MarketMakeAlgorithm {
                     let order = OrderIntent {
                         cloid,
                         symbol: ctx.symbol.clone(),
+                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
+                        asset: 0,
                         side: Side::Long,
                         px: bid_px,
                         sz: desired_bid_sz,
@@ -416,6 +420,8 @@ impl Algorithm for MarketMakeAlgorithm {
                     let order = OrderIntent {
                         cloid,
                         symbol: ctx.symbol.clone(),
+                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
+                        asset: 0,
                         side: Side::Short,
                         px: ask_px,
                         sz: desired_ask_sz,
