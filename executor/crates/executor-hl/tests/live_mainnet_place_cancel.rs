@@ -35,7 +35,11 @@ use std::time::Duration;
 
 const MAX_NOTIONAL_USD: Decimal = dec!(5);
 const ORDER_SZ_ETH: Decimal = dec!(0.001);
-const PRICE_OFFSET_RATIO: Decimal = dec!(0.99);
+/// Number of ticks below best_bid to place the ALO post-only order.
+/// HL ETH typical tick = $0.1 → 100 ticks = $10 (~0.4% below best_bid),
+/// well below cross threshold while staying inside HL's 5-sig-fig + szDecimals
+/// price-formatting constraints (we use the bid grid which is HL-valid by construction).
+const TICKS_BELOW_BID: usize = 100;
 const POST_PLACE_WAIT_MS: u64 = 200;
 
 fn master_address() -> Address {
@@ -93,13 +97,31 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
         .expect("ETH not in default perp universe") as u32;
     eprintln!("ETH asset index: {}", eth_idx);
 
-    // === best price ===
+    // === best price + tick-based offset ===
+    //
+    // HL price formatting requires (a) max 5 significant figures, (b) max
+    // (6 - szDecimals) decimal places. Computing `best_bid * 0.99` typically
+    // produces too many sig figs (e.g. 2384.7 * 0.99 = 2360.853). To stay
+    // HL-valid by construction, we observe the actual tick from the bid grid
+    // (level[0].px - level[1].px) and step `TICKS_BELOW_BID` ticks down from
+    // best_bid — that price is always on HL's grid.
     let book = client
         .fetch_book_snapshot(&Symbol::new("ETH"))
         .await
         .expect("fetch ETH book");
     let best_bid = book.best_bid().expect("ETH bid present");
-    let order_px = best_bid * PRICE_OFFSET_RATIO;
+    assert!(
+        book.bids.len() >= 2,
+        "need at least 2 bid levels to derive tick"
+    );
+    let tick = book.bids[0].px - book.bids[1].px;
+    assert!(
+        tick > Decimal::ZERO,
+        "tick must be positive: bids[0]={}, bids[1]={}",
+        book.bids[0].px,
+        book.bids[1].px
+    );
+    let order_px = best_bid - tick * Decimal::from(TICKS_BELOW_BID);
     let notional = order_px * ORDER_SZ_ETH;
     assert!(
         notional < MAX_NOTIONAL_USD,
@@ -107,9 +129,10 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
         notional,
         MAX_NOTIONAL_USD
     );
+    let safety_pct = (best_bid - order_px) / best_bid * dec!(100);
     eprintln!(
-        "ETH best_bid={}, order_px={} (1% below), notional≈${}",
-        best_bid, order_px, notional
+        "ETH best_bid={}, tick={}, order_px={} ({} ticks below, ≈{:.2}% safety), notional≈${}",
+        best_bid, tick, order_px, TICKS_BELOW_BID, safety_pct, notional
     );
 
     // === place ALO post-only ===
