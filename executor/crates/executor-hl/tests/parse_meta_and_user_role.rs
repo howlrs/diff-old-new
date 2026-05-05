@@ -15,11 +15,19 @@ fn parses_meta_default_universe() {
     let json = fixture("meta_default.json");
     let m: WireMeta = serde_json::from_str(&json).expect("parse meta");
     assert!(m.universe.len() >= 200, "expect 200+ perps");
-    let btc = m.universe.iter().find(|u| u.name == "BTC").expect("BTC present");
+    let btc = m
+        .universe
+        .iter()
+        .find(|u| u.name == "BTC")
+        .expect("BTC present");
     assert_eq!(btc.sz_decimals, 5);
     assert_eq!(btc.max_leverage, 40);
     assert!(!btc.only_isolated);
-    let eth = m.universe.iter().find(|u| u.name == "ETH").expect("ETH present");
+    let eth = m
+        .universe
+        .iter()
+        .find(|u| u.name == "ETH")
+        .expect("ETH present");
     assert_eq!(eth.sz_decimals, 4);
     assert_eq!(eth.max_leverage, 25);
 }

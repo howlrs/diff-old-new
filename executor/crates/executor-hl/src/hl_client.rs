@@ -395,7 +395,9 @@ impl RealHlClient {
         if !resp.status().is_success() {
             return Err(HlError::Network(format!("HTTP {}", resp.status())));
         }
-        resp.text().await.map_err(|e| HlError::Network(e.to_string()))
+        resp.text()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))
     }
 }
 

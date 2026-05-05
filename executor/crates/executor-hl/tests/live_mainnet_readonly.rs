@@ -9,8 +9,8 @@
 #![cfg(feature = "live")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use executor_core::types::Address;
 use executor_core::symbol::Symbol;
+use executor_core::types::Address;
 use executor_hl::hl_client::{HlClient, HlConfig, RealHlClient, Role};
 use executor_hl::signer::MockSigner;
 use std::sync::Arc;
@@ -72,8 +72,16 @@ async fn live_fetch_open_orders_default_dex() {
 async fn live_fetch_meta_returns_btc_and_eth() {
     let c = client();
     let m = c.fetch_meta(None).await.expect("fetch meta");
-    let btc = m.universe.iter().find(|u| u.name == "BTC").expect("BTC in meta");
-    let eth = m.universe.iter().find(|u| u.name == "ETH").expect("ETH in meta");
+    let btc = m
+        .universe
+        .iter()
+        .find(|u| u.name == "BTC")
+        .expect("BTC in meta");
+    let eth = m
+        .universe
+        .iter()
+        .find(|u| u.name == "ETH")
+        .expect("ETH in meta");
     assert!(btc.max_leverage >= 10);
     assert!(eth.max_leverage >= 10);
 }
@@ -87,5 +95,8 @@ async fn live_fetch_book_snapshot_eth_has_quotes() {
         .expect("fetch ETH book");
     assert!(book.best_bid().is_some(), "ETH bid present");
     assert!(book.best_ask().is_some(), "ETH ask present");
-    assert!(book.best_ask().unwrap() > book.best_bid().unwrap(), "spread positive");
+    assert!(
+        book.best_ask().unwrap() > book.best_bid().unwrap(),
+        "spread positive"
+    );
 }
