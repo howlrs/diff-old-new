@@ -5,6 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use executor_core::types::Address as CoreAddress;
 use executor_hl::signer::{Eip712AgentSigner, Signer};
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -29,7 +30,6 @@ struct Vector {
     name: String,
     action: serde_json::Value,
     nonce: u64,
-    #[allow(dead_code)] // PR-B1 dispatch_and_hash hard-codes vault=None
     vault_address: Option<String>,
     #[allow(dead_code)] // expires_after not yet exercised
     expires_after: Option<u64>,
@@ -77,15 +77,9 @@ async fn signer_address_matches_test_pk() {
 #[tokio::test]
 async fn cross_check_all_known_vectors() {
     let mut failed: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
     for v in vectors() {
-        // PR-B1 dispatch_and_hash hard-codes vault=None; vault-bearing
-        // vectors must wait for PR-B2 to add the vault parameter.
-        if v.vault_address.is_some() {
-            skipped.push(v.name.clone());
-            eprintln!("SKIP (vault not yet supported): {}", v.name);
-            continue;
-        }
+        // Parse vault if present (executor_core::types::Address is a String wrapper).
+        let vault: Option<CoreAddress> = v.vault_address.as_deref().map(CoreAddress::new);
 
         let signer =
             Eip712AgentSigner::from_secret(SecretString::new(TEST_PK.into()), v.is_mainnet)
@@ -99,7 +93,7 @@ async fn cross_check_all_known_vectors() {
             v.name
         );
 
-        let sig = match signer.sign_l1(&v.action, v.nonce).await {
+        let sig = match signer.sign_l1(&v.action, v.nonce, vault.as_ref()).await {
             Ok(s) => s,
             Err(e) => {
                 failed.push(format!("{}: sign_l1 errored: {e}", v.name));
@@ -131,11 +125,7 @@ async fn cross_check_all_known_vectors() {
         }
     }
     eprintln!("\n=== cross-check summary ===");
-    eprintln!(
-        "vectors checked: {} (skipped: {:?})",
-        10 - skipped.len(),
-        skipped
-    );
+    eprintln!("vectors checked: 10 (all)");
     if !failed.is_empty() {
         panic!("\ncross-check failures:\n{}\n", failed.join("\n\n"));
     }
