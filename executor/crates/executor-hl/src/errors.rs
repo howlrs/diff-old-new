@@ -22,6 +22,9 @@ pub enum HlError {
     #[error("invalid config: {0}")]
     InvalidConfig(String),
 
+    #[error("invalid action format: {0}")]
+    ActionFormat(String),
+
     #[error("hl exchange error: {code:?} {message}")]
     Exchange {
         code: Option<String>,
