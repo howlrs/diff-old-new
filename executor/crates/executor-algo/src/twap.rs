@@ -200,8 +200,6 @@ impl Algorithm for TwapAlgorithm {
                 if let Some(c) = current_passive_quote.take() {
                     let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                         symbol: ctx.symbol.clone(),
-                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                        asset: 0,
                         by_cloid: Some(c),
                         by_oid: None,
                     }));
@@ -220,8 +218,6 @@ impl Algorithm for TwapAlgorithm {
                 if let Some(c) = current_passive_quote.take() {
                     let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                         symbol: ctx.symbol.clone(),
-                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                        asset: 0,
                         by_cloid: Some(c),
                         by_oid: None,
                     }));
@@ -261,8 +257,6 @@ impl Algorithm for TwapAlgorithm {
             if let Some(c) = current_passive_quote.take() {
                 let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                     symbol: ctx.symbol.clone(),
-                    // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                    asset: 0,
                     by_cloid: Some(c),
                     by_oid: None,
                 }));
@@ -276,8 +270,6 @@ impl Algorithm for TwapAlgorithm {
                     let order = OrderIntent {
                         cloid,
                         symbol: ctx.symbol.clone(),
-                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                        asset: 0,
                         side,
                         px: limit_px,
                         sz: slice_target_remaining,
@@ -307,8 +299,6 @@ impl Algorithm for TwapAlgorithm {
                     let order = OrderIntent {
                         cloid,
                         symbol: ctx.symbol.clone(),
-                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                        asset: 0,
                         side,
                         px: touch,
                         sz: slice_target_remaining,
@@ -375,8 +365,6 @@ impl Algorithm for TwapAlgorithm {
         if let Some(c) = current_passive_quote.take() {
             let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                 symbol: ctx.symbol.clone(),
-                // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                asset: 0,
                 by_cloid: Some(c),
                 by_oid: None,
             }));

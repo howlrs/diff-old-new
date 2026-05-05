@@ -175,8 +175,6 @@ impl Algorithm for PassiveFollowAlgorithm {
                 if let Some((c, _)) = current_quote.take() {
                     let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                         symbol: ctx.symbol.clone(),
-                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                        asset: 0,
                         by_cloid: Some(c),
                         by_oid: None,
                     }));
@@ -195,8 +193,6 @@ impl Algorithm for PassiveFollowAlgorithm {
                 if let Some((c, _)) = current_quote.take() {
                     let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                         symbol: ctx.symbol.clone(),
-                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                        asset: 0,
                         by_cloid: Some(c),
                         by_oid: None,
                     }));
@@ -237,8 +233,6 @@ impl Algorithm for PassiveFollowAlgorithm {
                 if let Some((c, _)) = current_quote.take() {
                     let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                         symbol: ctx.symbol.clone(),
-                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                        asset: 0,
                         by_cloid: Some(c),
                         by_oid: None,
                     }));
@@ -266,8 +260,6 @@ impl Algorithm for PassiveFollowAlgorithm {
                 if let Some((c, _)) = current_quote.take() {
                     let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                         symbol: ctx.symbol.clone(),
-                        // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                        asset: 0,
                         by_cloid: Some(c),
                         by_oid: None,
                     }));
@@ -277,8 +269,6 @@ impl Algorithm for PassiveFollowAlgorithm {
                 let order = OrderIntent {
                     cloid,
                     symbol: ctx.symbol.clone(),
-                    // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                    asset: 0,
                     side,
                     px: new_touch,
                     sz: remaining,
