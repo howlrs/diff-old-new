@@ -7,6 +7,8 @@
 //! All numeric fields use `#[serde(with = "rust_decimal::serde::str")]`
 //! because HL serializes prices/sizes as JSON strings to preserve precision.
 
+use chrono::{TimeZone, Utc};
+use executor_core::state::{BookLevel, OrderBook};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -144,4 +146,59 @@ pub struct WireFrontendOpenOrder {
 pub enum WireOrderSide {
     A,
     B,
+}
+
+/// HL `l2Book` response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WireL2Book {
+    pub coin: String,
+    /// ms epoch of snapshot.
+    pub time: i64,
+    /// Two arrays: \[bids, asks\]. Bids descending, asks ascending.
+    pub levels: Vec<Vec<WireBookLevel>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WireBookLevel {
+    #[serde(with = "rust_decimal::serde::str")]
+    pub px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub sz: Decimal,
+    pub n: u32,
+}
+
+impl From<&WireBookLevel> for BookLevel {
+    fn from(w: &WireBookLevel) -> Self {
+        Self {
+            px: w.px,
+            sz: w.sz,
+            n: w.n,
+        }
+    }
+}
+
+impl WireL2Book {
+    /// Map into the domain `OrderBook` used by algorithms.
+    ///
+    /// HL guarantees `levels` is `[bids, asks]` with bids descending and
+    /// asks ascending; if a malformed response arrives with fewer than two
+    /// arrays, both sides are emitted empty so callers see "no quotes" rather
+    /// than panicking.
+    pub fn to_orderbook(&self) -> OrderBook {
+        let bids = self
+            .levels
+            .first()
+            .map(|v| v.iter().map(BookLevel::from).collect())
+            .unwrap_or_default();
+        let asks = self
+            .levels
+            .get(1)
+            .map(|v| v.iter().map(BookLevel::from).collect())
+            .unwrap_or_default();
+        OrderBook {
+            bids,
+            asks,
+            ts: Utc.timestamp_millis_opt(self.time).single(),
+        }
+    }
 }
