@@ -19,11 +19,12 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use executor_core::state::AppState;
-use executor_hl::batch_sender::{spawn_batch_sender, BatchSenderConfig};
+use executor_hl::batch_sender::{spawn_batch_sender_with_gate, BatchSenderConfig};
 use executor_hl::hl_client::{HlClient, HlConfig, MockHlClient, RealHlClient};
 use executor_hl::meta::MetaCache;
 use executor_hl::signer::{Eip712AgentSigner, MockSigner, Signer};
-use executor_server::{build_app, ServerState};
+use executor_hl::IntentChecker;
+use executor_server::{build_app, SafetyGate, ServerState};
 use secrecy::SecretString;
 
 #[derive(Parser, Debug)]
@@ -40,6 +41,16 @@ struct Args {
     /// Bind address (host:port).
     #[arg(long, env = "EXECUTOR_BIND", default_value = "0.0.0.0:8085")]
     bind: String,
+
+    /// Mainnet allow-list of symbols (comma-separated, e.g. "ETH,BTC").
+    /// REQUIRED for `--mode real --base mainnet`.
+    /// Use `*` to explicitly allow all (NOT recommended for production).
+    #[arg(long, env = "EXECUTOR_MAINNET_ALLOW_SYMBOLS", default_value = "")]
+    mainnet_allow_symbols: String,
+
+    /// Per-order USD notional cap. Omit for no cap (NOT recommended for production).
+    #[arg(long, env = "EXECUTOR_MAINNET_MAX_NOTIONAL_USD")]
+    mainnet_max_notional_usd: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -74,9 +85,28 @@ async fn main() -> anyhow::Result<()> {
         max_batch_size: 50,
     };
 
-    // `spawn_batch_sender<C>` requires a concrete sized `C: HlClient`, so we
-    // build the BatchSender inside each match arm where the type is known and
-    // erase to `Arc<dyn HlClient>` only for `ServerState::new`.
+    // PR-C2: build the safety gate. In real mode this validates the CLI args
+    // (mainnet+empty allow-list is a fatal error per Gemini deep, 2026-05-05).
+    let is_mainnet_real = matches!(args.mode, Mode::Real) && matches!(args.base, Base::Mainnet);
+    let safety = Arc::new(match args.mode {
+        Mode::Mock => SafetyGate::disabled(),
+        Mode::Real => SafetyGate::from_args(
+            &args.mainnet_allow_symbols,
+            args.mainnet_max_notional_usd,
+            is_mainnet_real,
+        )
+        .context("safety gate construction failed")?,
+    });
+    tracing::info!(
+        mode = ?args.mode,
+        allow_symbols = ?safety.allow_symbols,
+        max_notional_usd = ?safety.max_notional_usd,
+        "safety gate constructed",
+    );
+
+    // `spawn_batch_sender_with_gate<C>` requires a concrete sized `C: HlClient`,
+    // so we build the BatchSender inside each match arm where the type is known
+    // and erase to `Arc<dyn HlClient>` only for `ServerState::new`.
     let (hl_client, signer, batch_sender, batch_handle): (
         Arc<dyn HlClient>,
         Arc<dyn Signer>,
@@ -87,7 +117,8 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("starting in mock mode");
             let mock_hl = Arc::new(MockHlClient::new());
             let mock_signer: Arc<dyn Signer> = Arc::new(MockSigner::new());
-            let (batch_sender, batch_handle) = spawn_batch_sender(mock_hl.clone(), batch_cfg);
+            let (batch_sender, batch_handle) =
+                spawn_batch_sender_with_gate(mock_hl.clone(), None, batch_cfg);
             let hl_dyn: Arc<dyn HlClient> = mock_hl;
             (hl_dyn, mock_signer, batch_sender, batch_handle)
         }
@@ -112,7 +143,9 @@ async fn main() -> anyhow::Result<()> {
             );
             tracing::info!(symbols = meta.len(), "MetaCache built (default dex)");
             let real_client = Arc::new(bootstrap.with_meta(meta));
-            let (batch_sender, batch_handle) = spawn_batch_sender(real_client.clone(), batch_cfg);
+            let gate_dyn: Arc<dyn IntentChecker> = safety.clone();
+            let (batch_sender, batch_handle) =
+                spawn_batch_sender_with_gate(real_client.clone(), Some(gate_dyn), batch_cfg);
             let hl_dyn: Arc<dyn HlClient> = real_client;
             (hl_dyn, signer, batch_sender, batch_handle)
         }
@@ -124,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         signer,
         batch_sender,
         batch_handle,
+        safety,
     ));
 
     let app = build_app(state);

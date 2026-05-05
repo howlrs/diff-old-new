@@ -20,6 +20,7 @@ use executor_core::intent::{CancelIntent, OrderIntent};
 
 use crate::errors::HlError;
 use crate::hl_client::HlClient;
+use crate::intent_checker::IntentChecker;
 
 /// Either an order to place or a cancel to send.
 #[derive(Debug, Clone)]
@@ -45,9 +46,21 @@ impl Default for BatchSenderConfig {
 }
 
 /// Sender side: hand to algorithms.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BatchSender {
     tx: mpsc::Sender<Envelope>,
+    /// `None` = gate disabled (mock mode / pre-PR-C2 path).
+    /// `Some(...)` = consulted before enqueueing each `OrderOrCancel::Place`;
+    /// `OrderOrCancel::Cancel` always bypasses the gate (emergency_stop must work).
+    gate: Option<Arc<dyn IntentChecker>>,
+}
+
+impl std::fmt::Debug for BatchSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchSender")
+            .field("gate", &self.gate.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -59,6 +72,9 @@ struct Envelope {
 
 impl BatchSender {
     pub fn enqueue(&self, item: OrderOrCancel) -> Result<(), HlError> {
+        if let Some(reason) = self.gate_reject_reason(&item) {
+            return Err(HlError::ActionFormat(format!("safety_gate: {reason}")));
+        }
         self.tx
             .try_send(Envelope { item, ack: None })
             .map_err(|e| HlError::Network(format!("batch enqueue: {e}")))
@@ -69,6 +85,9 @@ impl BatchSender {
         &self,
         item: OrderOrCancel,
     ) -> Result<oneshot::Receiver<Result<(), HlError>>, HlError> {
+        if let Some(reason) = self.gate_reject_reason(&item) {
+            return Err(HlError::ActionFormat(format!("safety_gate: {reason}")));
+        }
         let (ack_tx, ack_rx) = oneshot::channel();
         self.tx
             .send(Envelope {
@@ -79,6 +98,30 @@ impl BatchSender {
             .map_err(|e| HlError::Network(format!("batch enqueue: {e}")))?;
         Ok(ack_rx)
     }
+
+    /// Gate-only check: returns `Some(reason)` when the place should be
+    /// rejected, `None` when it passes (or is a Cancel / no gate configured).
+    /// Logs the rejection at error level so operators can see safety drops
+    /// without having to thread the BatchSender's tracing context to the call site.
+    fn gate_reject_reason(&self, item: &OrderOrCancel) -> Option<String> {
+        let gate = self.gate.as_ref()?;
+        let intent = match item {
+            OrderOrCancel::Place(o) => o,
+            OrderOrCancel::Cancel(_) => return None,
+        };
+        match gate.check_place(intent) {
+            Ok(()) => None,
+            Err(reason) => {
+                tracing::error!(
+                    reason = %reason,
+                    cloid = ?intent.cloid,
+                    symbol = %intent.symbol,
+                    "safety_gate: drop place"
+                );
+                Some(reason)
+            }
+        }
+    }
 }
 
 /// Spawned flusher task handle; await on this to know when it has shut down.
@@ -88,10 +131,25 @@ pub struct BatchSenderHandle {
     pub shutdown: oneshot::Sender<()>,
 }
 
-/// Spawn a BatchSender + flusher pair. Returns the sender (clone for each algo)
-/// and a handle to await/cleanly stop the flusher.
+/// Spawn a BatchSender + flusher pair without a safety gate. Equivalent to
+/// `spawn_batch_sender_with_gate(client, None, cfg)`.
 pub fn spawn_batch_sender<C>(
     client: Arc<C>,
+    cfg: BatchSenderConfig,
+) -> (BatchSender, BatchSenderHandle)
+where
+    C: HlClient + 'static,
+{
+    spawn_batch_sender_with_gate(client, None, cfg)
+}
+
+/// Spawn a BatchSender + flusher pair with an optional `IntentChecker` gate.
+/// PR-C2 (Gemini deep, 2026-05-05): real-mode startup wires this up so every
+/// `OrderOrCancel::Place` is checked at enqueue time. `OrderOrCancel::Cancel`
+/// always bypasses the gate so `emergency_stop` keeps working.
+pub fn spawn_batch_sender_with_gate<C>(
+    client: Arc<C>,
+    gate: Option<Arc<dyn IntentChecker>>,
     cfg: BatchSenderConfig,
 ) -> (BatchSender, BatchSenderHandle)
 where
@@ -101,7 +159,7 @@ where
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(flusher_loop(client, rx, cfg, shutdown_rx));
     (
-        BatchSender { tx },
+        BatchSender { tx, gate },
         BatchSenderHandle {
             join,
             shutdown: shutdown_tx,
@@ -299,5 +357,96 @@ mod tests {
         let cancelled = mock.cancelled_calls();
         assert!(!placed.is_empty());
         assert!(!cancelled.is_empty());
+    }
+
+    // ---- PR-C2: gate tests ----
+
+    #[derive(Debug)]
+    struct AllowAll;
+
+    impl IntentChecker for AllowAll {
+        fn check_place(&self, _: &OrderIntent) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct RejectAll;
+
+    impl IntentChecker for RejectAll {
+        fn check_place(&self, _: &OrderIntent) -> Result<(), String> {
+            Err("blocked by test".into())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn enqueue_with_gate_rejects_violation() {
+        let mock = Arc::new(MockHlClient::new());
+        let (sender, handle) = spawn_batch_sender_with_gate(
+            mock.clone(),
+            Some(Arc::new(RejectAll) as Arc<dyn IntentChecker>),
+            BatchSenderConfig::default(),
+        );
+        let res = sender.enqueue(OrderOrCancel::Place(order(Cloid::new())));
+        let err = res.expect_err("gate must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("safety_gate") && msg.contains("blocked by test"),
+            "unexpected error: {msg}"
+        );
+        // No flush should happen — buffer is empty.
+        tokio::time::advance(Duration::from_millis(150)).await;
+        let _ = handle.shutdown.send(());
+        let _ = handle.join.await;
+        assert!(
+            mock.placed_calls().is_empty(),
+            "rejected orders must never reach client"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn enqueue_with_gate_passes_ok() {
+        let mock = Arc::new(MockHlClient::new());
+        let (sender, handle) = spawn_batch_sender_with_gate(
+            mock.clone(),
+            Some(Arc::new(AllowAll) as Arc<dyn IntentChecker>),
+            BatchSenderConfig::default(),
+        );
+        sender
+            .enqueue(OrderOrCancel::Place(order(Cloid::new())))
+            .expect("AllowAll must pass");
+        tokio::time::advance(Duration::from_millis(150)).await;
+        let _ = handle.shutdown.send(());
+        let _ = handle.join.await;
+        let calls = mock.placed_calls();
+        assert_eq!(
+            calls.iter().map(|v| v.len()).sum::<usize>(),
+            1,
+            "the single allowed order must reach client"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn enqueue_cancel_skips_gate() {
+        let mock = Arc::new(MockHlClient::new());
+        let (sender, handle) = spawn_batch_sender_with_gate(
+            mock.clone(),
+            Some(Arc::new(RejectAll) as Arc<dyn IntentChecker>),
+            BatchSenderConfig::default(),
+        );
+        sender
+            .enqueue(OrderOrCancel::Cancel(CancelIntent {
+                symbol: Symbol::new("BTC"),
+                by_cloid: Some(Cloid::new()),
+                by_oid: None,
+            }))
+            .expect("Cancel must pass even with RejectAll gate");
+        tokio::time::advance(Duration::from_millis(150)).await;
+        let _ = handle.shutdown.send(());
+        let _ = handle.join.await;
+        assert!(
+            !mock.cancelled_calls().is_empty(),
+            "cancel must reach client unchanged"
+        );
     }
 }
