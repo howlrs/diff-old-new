@@ -29,5 +29,5 @@ pub use hl_client::{
     RealHlClient, Role,
 };
 pub use rate_limiter::TokenBucket;
-pub use signer::{MockSigner, Signature, Signer};
+pub use signer::{Eip712AgentSigner, MockSigner, Signature, Signer};
 pub use ws_state::WsStateManager;
