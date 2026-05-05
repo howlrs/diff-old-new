@@ -57,3 +57,28 @@ fn parses_empty_account() {
     assert_eq!(s.withdrawable, dec!(0));
     assert_eq!(s.margin_summary.account_value, dec!(0));
 }
+
+use executor_core::symbol::Symbol;
+use executor_core::types::Address;
+use executor_hl::AccountStateSnapshot;
+
+#[test]
+fn maps_wire_into_account_state_snapshot() {
+    let json = fixture("clearinghouse_state_default.json");
+    let wire: WireClearinghouseState = serde_json::from_str(&json).unwrap();
+
+    let addr = Address::new("0x000000000000000000000000000000000000dead");
+    let snap = AccountStateSnapshot::from_wire(addr.clone(), &wire);
+
+    assert_eq!(snap.address, addr);
+    assert_eq!(snap.account_value, dec!(643.718581));
+    assert_eq!(snap.margin_used, dec!(608.847078));
+    assert_eq!(snap.withdrawable, dec!(34.871503));
+    assert_eq!(snap.cross_maintenance_margin_used, dec!(304.423539));
+    assert_eq!(snap.positions.len(), 1);
+    let hype = snap.positions.get(&Symbol::new("HYPE")).expect("HYPE");
+    assert_eq!(hype.size, dec!(144.53));
+    assert_eq!(hype.entry_px, Some(dec!(41.5108)));
+    assert_eq!(hype.unrealized_pnl, Some(dec!(88.91306)));
+    assert_eq!(hype.margin_used, Some(dec!(608.847078)));
+}

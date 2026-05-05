@@ -4,7 +4,7 @@
 //! 内部の EIP-712 sign + `/exchange` POST は次フェーズで実装 (鍵管理 ブレスト後).
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,15 +46,74 @@ impl HlConfig {
     }
 }
 
-/// Account-level snapshot returned by `/info clearinghouseState` (subset).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Account-level snapshot returned by `/info clearinghouseState`.
+///
+/// HL returns numeric values as JSON strings; this struct holds them as
+/// `Decimal` after `from_wire` mapping. `address` is the master EOA the
+/// snapshot was fetched for; `server_time` is HL's snapshot timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountStateSnapshot {
-    pub address: Option<Address>,
-    pub margin_used: Option<Decimal>,
-    pub account_value: Option<Decimal>,
+    pub address: Address,
+    pub margin_used: Decimal,
+    pub account_value: Decimal,
+    pub withdrawable: Decimal,
+    pub cross_maintenance_margin_used: Decimal,
     pub positions: HashMap<Symbol, Position>,
     pub open_orders_by_cloid: HashMap<Cloid, OrderId>,
     pub fetched_at: DateTime<Utc>,
+    pub server_time: DateTime<Utc>,
+}
+
+impl AccountStateSnapshot {
+    /// Map the wire representation into the domain snapshot.
+    pub fn from_wire(address: Address, wire: &crate::wire::WireClearinghouseState) -> Self {
+        let now = Utc::now();
+        let server_time = chrono::Utc
+            .timestamp_millis_opt(wire.time as i64)
+            .single()
+            .unwrap_or(now);
+        let mut positions = HashMap::new();
+        for ap in &wire.asset_positions {
+            let p = &ap.position;
+            positions.insert(
+                Symbol::new(&p.coin),
+                Position {
+                    size: p.szi,
+                    entry_px: Some(p.entry_px),
+                    unrealized_pnl: Some(p.unrealized_pnl),
+                    margin_used: Some(p.margin_used),
+                    last_update: Some(server_time),
+                },
+            );
+        }
+        Self {
+            address,
+            margin_used: wire.margin_summary.total_margin_used,
+            account_value: wire.margin_summary.account_value,
+            withdrawable: wire.withdrawable,
+            cross_maintenance_margin_used: wire.cross_maintenance_margin_used,
+            positions,
+            open_orders_by_cloid: HashMap::new(),
+            fetched_at: now,
+            server_time,
+        }
+    }
+
+    /// Empty snapshot for tests/mocks where no real data is needed yet.
+    pub fn empty(address: Address) -> Self {
+        let now = Utc::now();
+        Self {
+            address,
+            margin_used: Decimal::ZERO,
+            account_value: Decimal::ZERO,
+            withdrawable: Decimal::ZERO,
+            cross_maintenance_margin_used: Decimal::ZERO,
+            positions: HashMap::new(),
+            open_orders_by_cloid: HashMap::new(),
+            fetched_at: now,
+            server_time: now,
+        }
+    }
 }
 
 /// Place-order response.
@@ -84,7 +143,7 @@ pub trait HlClient: Send + Sync {
 
 /// `MockHlClient` records calls in memory and returns Ok responses. Used for
 /// the 80 % prototype, unit tests, and integration tests with no key.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MockHlClient {
     placed: Mutex<Vec<Vec<OrderIntent>>>,
     cancelled: Mutex<Vec<Vec<CancelIntent>>>,
@@ -92,6 +151,19 @@ pub struct MockHlClient {
     pub account: Mutex<AccountStateSnapshot>,
     /// Pre-seeded book per symbol.
     pub books: Mutex<HashMap<Symbol, OrderBook>>,
+}
+
+impl Default for MockHlClient {
+    fn default() -> Self {
+        Self {
+            placed: Mutex::new(Vec::new()),
+            cancelled: Mutex::new(Vec::new()),
+            account: Mutex::new(AccountStateSnapshot::empty(Address::new(
+                "0x0000000000000000000000000000000000000000",
+            ))),
+            books: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 impl MockHlClient {
@@ -124,9 +196,13 @@ impl MockHlClient {
 impl HlClient for MockHlClient {
     async fn fetch_account_state(
         &self,
-        _address: &Address,
+        address: &Address,
     ) -> Result<AccountStateSnapshot, HlError> {
-        let snap = self.account.lock().map(|g| g.clone()).unwrap_or_default();
+        let snap = self
+            .account
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| AccountStateSnapshot::empty(address.clone()));
         Ok(snap)
     }
 
@@ -230,12 +306,13 @@ impl HlClient for RealHlClient {
         if !resp.status().is_success() {
             return Err(HlError::Network(format!("HTTP {}", resp.status())));
         }
-        // Phase 3.5+ で完全なパースを実装. 80% プロトでは骨格のみ.
-        Ok(AccountStateSnapshot {
-            address: Some(address.clone()),
-            fetched_at: Utc::now(),
-            ..Default::default()
-        })
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        let wire: crate::wire::WireClearinghouseState = serde_json::from_str(&text)
+            .map_err(|e| HlError::InvalidResponse(format!("clearinghouseState: {e}")))?;
+        Ok(AccountStateSnapshot::from_wire(address.clone(), &wire))
     }
 
     async fn fetch_book_snapshot(&self, symbol: &Symbol) -> Result<OrderBook, HlError> {
