@@ -79,4 +79,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --all-features
+        # NOTE: --all-features intentionally avoided. The executor-hl `live`
+        # feature hits real Hyperliquid mainnet /info and would burn rate
+        # limit / leak the test EOA in CI logs. Run `cargo test -p executor-hl
+        # --features live` locally with HL_TEST_ADDRESS set when needed.
+        run: cargo test --workspace

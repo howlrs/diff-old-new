@@ -1,0 +1,42 @@
+{
+  "marginSummary": {
+    "accountValue": "553.266963",
+    "totalNtlPos": "1993.93012",
+    "totalRawUsd": "-1440.663157",
+    "totalMarginUsed": "199.393012"
+  },
+  "crossMarginSummary": {
+    "accountValue": "553.266963",
+    "totalNtlPos": "1993.93012",
+    "totalRawUsd": "-1440.663157",
+    "totalMarginUsed": "199.393012"
+  },
+  "crossMaintenanceMarginUsed": "99.696506",
+  "withdrawable": "3.243951",
+  "assetPositions": [
+    {
+      "type": "oneWay",
+      "position": {
+        "coin": "xyz:META",
+        "szi": "3.262",
+        "leverage": {
+          "type": "cross",
+          "value": 10
+        },
+        "entryPx": "612.97",
+        "positionValue": "1993.93012",
+        "unrealizedPnl": "-5.57802",
+        "returnOnEquity": "-0.0278969607",
+        "liquidationPx": null,
+        "marginUsed": "199.393012",
+        "maxLeverage": 10,
+        "cumFunding": {
+          "allTime": "0.832766",
+          "sinceOpen": "0.832766",
+          "sinceChange": "0.832766"
+        }
+      }
+    }
+  ],
+  "time": 1777951627366
+}

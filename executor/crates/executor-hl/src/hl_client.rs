@@ -4,7 +4,7 @@
 //! 内部の EIP-712 sign + `/exchange` POST は次フェーズで実装 (鍵管理 ブレスト後).
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,15 +46,74 @@ impl HlConfig {
     }
 }
 
-/// Account-level snapshot returned by `/info clearinghouseState` (subset).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Account-level snapshot returned by `/info clearinghouseState`.
+///
+/// HL returns numeric values as JSON strings; this struct holds them as
+/// `Decimal` after `from_wire` mapping. `address` is the master EOA the
+/// snapshot was fetched for; `server_time` is HL's snapshot timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountStateSnapshot {
-    pub address: Option<Address>,
-    pub margin_used: Option<Decimal>,
-    pub account_value: Option<Decimal>,
+    pub address: Address,
+    pub margin_used: Decimal,
+    pub account_value: Decimal,
+    pub withdrawable: Decimal,
+    pub cross_maintenance_margin_used: Decimal,
     pub positions: HashMap<Symbol, Position>,
     pub open_orders_by_cloid: HashMap<Cloid, OrderId>,
     pub fetched_at: DateTime<Utc>,
+    pub server_time: DateTime<Utc>,
+}
+
+impl AccountStateSnapshot {
+    /// Map the wire representation into the domain snapshot.
+    pub fn from_wire(address: Address, wire: &crate::wire::WireClearinghouseState) -> Self {
+        let now = Utc::now();
+        let server_time = chrono::Utc
+            .timestamp_millis_opt(wire.time as i64)
+            .single()
+            .unwrap_or(now);
+        let mut positions = HashMap::new();
+        for ap in &wire.asset_positions {
+            let p = &ap.position;
+            positions.insert(
+                Symbol::new(&p.coin),
+                Position {
+                    size: p.szi,
+                    entry_px: Some(p.entry_px),
+                    unrealized_pnl: Some(p.unrealized_pnl),
+                    margin_used: Some(p.margin_used),
+                    last_update: Some(server_time),
+                },
+            );
+        }
+        Self {
+            address,
+            margin_used: wire.margin_summary.total_margin_used,
+            account_value: wire.margin_summary.account_value,
+            withdrawable: wire.withdrawable,
+            cross_maintenance_margin_used: wire.cross_maintenance_margin_used,
+            positions,
+            open_orders_by_cloid: HashMap::new(),
+            fetched_at: now,
+            server_time,
+        }
+    }
+
+    /// Empty snapshot for tests/mocks where no real data is needed yet.
+    pub fn empty(address: Address) -> Self {
+        let now = Utc::now();
+        Self {
+            address,
+            margin_used: Decimal::ZERO,
+            account_value: Decimal::ZERO,
+            withdrawable: Decimal::ZERO,
+            cross_maintenance_margin_used: Decimal::ZERO,
+            positions: HashMap::new(),
+            open_orders_by_cloid: HashMap::new(),
+            fetched_at: now,
+            server_time: now,
+        }
+    }
 }
 
 /// Place-order response.
@@ -66,25 +125,114 @@ pub struct OrderResponse {
     pub error: Option<String>,
 }
 
+/// Domain-level open order (one HL `openOrders` entry mapped to local types).
+///
+/// We keep the wire `oid` and translate side into `executor_core::types::Side`
+/// for callers; cloid is unknown from `openOrders` alone (HL does not echo it
+/// in this endpoint), so it stays None until matched with local registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HlOpenOrder {
+    pub symbol: Symbol,
+    pub side: executor_core::types::Side,
+    pub limit_px: Decimal,
+    pub sz: Decimal,
+    pub oid: OrderId,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl HlOpenOrder {
+    pub fn from_wire(w: &crate::wire::WireOpenOrder) -> Self {
+        use crate::wire::WireOrderSide;
+        let side = match w.side {
+            WireOrderSide::A => executor_core::types::Side::Short, // ask = sell
+            WireOrderSide::B => executor_core::types::Side::Long,  // bid = buy
+        };
+        let ts = chrono::Utc
+            .timestamp_millis_opt(w.timestamp)
+            .single()
+            .unwrap_or_else(Utc::now);
+        Self {
+            symbol: Symbol::new(&w.coin),
+            side,
+            limit_px: w.limit_px,
+            sz: w.sz,
+            oid: OrderId(w.oid),
+            timestamp: ts,
+        }
+    }
+}
+
+/// HL `userRole` mapped to a Rust enum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    User,
+    Agent { master: Address },
+    Vault,
+    SubAccount,
+    Missing,
+}
+
+/// Catch-all for HL roles we don't know yet (forward compatibility).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnknownRole(pub String);
+
+impl Role {
+    pub fn from_wire(w: &crate::wire::WireUserRole) -> Self {
+        use crate::wire::{WireUserRole as W, WireUserRoleTagged as T};
+        match w {
+            W::Tagged(t) => match t {
+                T::User => Role::User,
+                T::Agent { data } => Role::Agent {
+                    master: Address::new(&data.user),
+                },
+                T::Vault => Role::Vault,
+                T::SubAccount => Role::SubAccount,
+                T::Missing => Role::Missing,
+            },
+            // Unknown JSON value (e.g. `{"role":"marketMaker"}`) — preserve it
+            // as Missing so callers don't crash but behavior matches the
+            // safest known variant.
+            W::Unknown(_) => Role::Missing,
+        }
+    }
+}
+
 #[async_trait]
 pub trait HlClient: Send + Sync {
-    /// Fetch full account state (positions, open orders, margin).
-    async fn fetch_account_state(&self, address: &Address)
-        -> Result<AccountStateSnapshot, HlError>;
+    /// Fetch full account state. `dex=None` selects the default perp dex;
+    /// `dex=Some("xyz")` etc. selects a HIP-3 builder dex.
+    async fn fetch_account_state(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<AccountStateSnapshot, HlError>;
 
-    /// Fetch a fresh top-N book snapshot (for state init / reconciliation).
+    /// Fetch a fresh top-N book snapshot.
     async fn fetch_book_snapshot(&self, symbol: &Symbol) -> Result<OrderBook, HlError>;
 
-    /// Place a batch of orders. Returns per-cloid response.
+    /// Fetch all open orders for the address (default dex unless specified).
+    async fn fetch_open_orders(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError>;
+
+    /// Fetch the perp universe metadata (symbol list + leverage caps).
+    async fn fetch_meta(&self, dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError>;
+
+    /// Identify the role of an address (catches agent/master mix-ups).
+    async fn fetch_user_role(&self, address: &Address) -> Result<Role, HlError>;
+
+    /// Place a batch of orders.
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError>;
 
-    /// Cancel a batch of orders by cloid (preferred) or oid.
+    /// Cancel a batch of orders.
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError>;
 }
 
 /// `MockHlClient` records calls in memory and returns Ok responses. Used for
 /// the 80 % prototype, unit tests, and integration tests with no key.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MockHlClient {
     placed: Mutex<Vec<Vec<OrderIntent>>>,
     cancelled: Mutex<Vec<Vec<CancelIntent>>>,
@@ -92,6 +240,19 @@ pub struct MockHlClient {
     pub account: Mutex<AccountStateSnapshot>,
     /// Pre-seeded book per symbol.
     pub books: Mutex<HashMap<Symbol, OrderBook>>,
+}
+
+impl Default for MockHlClient {
+    fn default() -> Self {
+        Self {
+            placed: Mutex::new(Vec::new()),
+            cancelled: Mutex::new(Vec::new()),
+            account: Mutex::new(AccountStateSnapshot::empty(Address::new(
+                "0x0000000000000000000000000000000000000000",
+            ))),
+            books: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 impl MockHlClient {
@@ -124,9 +285,14 @@ impl MockHlClient {
 impl HlClient for MockHlClient {
     async fn fetch_account_state(
         &self,
-        _address: &Address,
+        address: &Address,
+        _dex: Option<&str>,
     ) -> Result<AccountStateSnapshot, HlError> {
-        let snap = self.account.lock().map(|g| g.clone()).unwrap_or_default();
+        let snap = self
+            .account
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| AccountStateSnapshot::empty(address.clone()));
         Ok(snap)
     }
 
@@ -139,6 +305,24 @@ impl HlClient for MockHlClient {
             .get(symbol)
             .cloned()
             .ok_or_else(|| HlError::InvalidResponse(format!("no seeded book for {symbol}")))
+    }
+
+    async fn fetch_open_orders(
+        &self,
+        _address: &Address,
+        _dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch_meta(&self, _dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError> {
+        Ok(crate::wire::WireMeta {
+            universe: Vec::new(),
+        })
+    }
+
+    async fn fetch_user_role(&self, _address: &Address) -> Result<Role, HlError> {
+        Ok(Role::User)
     }
 
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError> {
@@ -207,6 +391,29 @@ impl RealHlClient {
             http,
         }
     }
+
+    /// POST a JSON body to the /info endpoint and return the response body as a String.
+    /// Maps non-2xx into `HlError::Network` with the response body included so
+    /// HL's JSON error detail (e.g. "Unknown dex", rate-limit reason) is
+    /// preserved for diagnosis.
+    async fn post_info(&self, body: &serde_json::Value) -> Result<String, HlError> {
+        let resp = self
+            .http
+            .post(&self.config.info_url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        if !status.is_success() {
+            return Err(HlError::Network(format!("HTTP {status}: {text}")));
+        }
+        Ok(text)
+    }
 }
 
 #[async_trait]
@@ -214,48 +421,73 @@ impl HlClient for RealHlClient {
     async fn fetch_account_state(
         &self,
         address: &Address,
+        dex: Option<&str>,
     ) -> Result<AccountStateSnapshot, HlError> {
         let _wait = self.rate_limiter.acquire(2).await;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "type": "clearinghouseState",
             "user": address.as_str(),
         });
-        let resp = self
-            .http
-            .post(&self.config.info_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HlError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(HlError::Network(format!("HTTP {}", resp.status())));
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
         }
-        // Phase 3.5+ で完全なパースを実装. 80% プロトでは骨格のみ.
-        Ok(AccountStateSnapshot {
-            address: Some(address.clone()),
-            fetched_at: Utc::now(),
-            ..Default::default()
-        })
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireClearinghouseState = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("clearinghouseState: {e}")))?;
+        Ok(AccountStateSnapshot::from_wire(address.clone(), &wire))
     }
 
     async fn fetch_book_snapshot(&self, symbol: &Symbol) -> Result<OrderBook, HlError> {
-        let _wait = self.rate_limiter.acquire(1).await;
+        let _wait = self.rate_limiter.acquire(2).await;
         let body = serde_json::json!({
             "type": "l2Book",
             "coin": symbol.as_str(),
         });
-        let resp = self
-            .http
-            .post(&self.config.info_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HlError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(HlError::Network(format!("HTTP {}", resp.status())));
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireL2Book = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("l2Book: {e}")))?;
+        Ok(wire.to_orderbook())
+    }
+
+    async fn fetch_open_orders(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let mut body = serde_json::json!({
+            "type": "openOrders",
+            "user": address.as_str(),
+        });
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
         }
-        // 80% プロト: 空 book を返す. 実装は次 PR で詳細化.
-        Ok(OrderBook::default())
+        let resp = self.post_info(&body).await?;
+        let wire: Vec<crate::wire::WireOpenOrder> = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("openOrders: {e}")))?;
+        Ok(wire.iter().map(HlOpenOrder::from_wire).collect())
+    }
+
+    async fn fetch_meta(&self, dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let mut body = serde_json::json!({"type": "meta"});
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
+        }
+        let resp = self.post_info(&body).await?;
+        serde_json::from_str(&resp).map_err(|e| HlError::InvalidResponse(format!("meta: {e}")))
+    }
+
+    async fn fetch_user_role(&self, address: &Address) -> Result<Role, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let body = serde_json::json!({
+            "type": "userRole",
+            "user": address.as_str(),
+        });
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireUserRole = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("userRole: {e}")))?;
+        Ok(Role::from_wire(&wire))
     }
 
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError> {
