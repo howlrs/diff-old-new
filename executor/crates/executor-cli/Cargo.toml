@@ -1,0 +1,27 @@
+[package]
+name = "executor-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Local CLI test client (dry-run) — PR-8"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "executor-cli"
+path = "src/main.rs"
+
+[dependencies]
+executor-core = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }

@@ -1,0 +1,50 @@
+[package]
+name = "executor-hl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Hyperliquid HTTP/WS client + signer abstraction"
+
+[lints]
+workspace = true
+
+[dependencies]
+executor-core = { workspace = true }
+
+# async / tokio
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# HTTP / WS
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Numerics
+rust_decimal = { workspace = true }
+
+# Errors / logging
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Security: zeroize 秘密鍵
+secrecy = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+proptest = { workspace = true }
+rstest = { workspace = true }
+rust_decimal_macros = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
