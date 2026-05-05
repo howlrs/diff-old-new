@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use executor_hl::wire::{InfoClearinghouseState, WireLeverageType};
+use executor_hl::wire::{WireClearinghouseState, WireLeverageType};
 use rust_decimal_macros::dec;
 use std::path::PathBuf;
 
@@ -14,7 +14,7 @@ fn fixture(name: &str) -> String {
 #[test]
 fn parses_default_dex_with_one_position() {
     let json = fixture("clearinghouse_state_default.json");
-    let s: InfoClearinghouseState = serde_json::from_str(&json).expect("parse default");
+    let s: WireClearinghouseState = serde_json::from_str(&json).expect("parse default");
 
     // Top-level
     assert_eq!(s.margin_summary.account_value, dec!(643.718581));
@@ -43,7 +43,7 @@ fn parses_default_dex_with_one_position() {
 #[test]
 fn parses_xyz_dex_with_one_position() {
     let json = fixture("clearinghouse_state_xyz.json");
-    let s: InfoClearinghouseState = serde_json::from_str(&json).expect("parse xyz");
+    let s: WireClearinghouseState = serde_json::from_str(&json).expect("parse xyz");
     assert_eq!(s.asset_positions.len(), 1);
     assert_eq!(s.asset_positions[0].position.coin, "xyz:META");
     assert_eq!(s.asset_positions[0].position.szi, dec!(3.262));
@@ -52,7 +52,7 @@ fn parses_xyz_dex_with_one_position() {
 #[test]
 fn parses_empty_account() {
     let json = fixture("clearinghouse_state_empty.json");
-    let s: InfoClearinghouseState = serde_json::from_str(&json).expect("parse empty");
+    let s: WireClearinghouseState = serde_json::from_str(&json).expect("parse empty");
     assert_eq!(s.asset_positions.len(), 0);
     assert_eq!(s.withdrawable, dec!(0));
     assert_eq!(s.margin_summary.account_value, dec!(0));
