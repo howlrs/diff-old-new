@@ -262,8 +262,6 @@ pub async fn emergency_stop(
     for order in open_orders {
         let intent = CancelIntent {
             symbol: order.symbol.clone(),
-            // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-            asset: 0,
             by_cloid: Some(order.cloid),
             by_oid: order.oid,
         };
