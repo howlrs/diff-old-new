@@ -19,11 +19,7 @@
 //! the Claude session — only the user's interactive shell.
 
 #![cfg(feature = "live")]
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::cloned_ref_to_slice_refs
-)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use executor_core::cloid::Cloid;
 use executor_core::intent::{CancelIntent, OrderIntent};
@@ -129,7 +125,7 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
         reduce_only: false,
     };
     let place_resp = client
-        .place_orders(&[intent.clone()])
+        .place_orders(std::slice::from_ref(&intent))
         .await
         .expect("place_orders network/sign error");
     assert_eq!(place_resp.len(), 1, "expected 1 response");
