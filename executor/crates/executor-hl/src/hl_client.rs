@@ -228,6 +228,21 @@ pub trait HlClient: Send + Sync {
 
     /// Cancel a batch of orders.
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError>;
+
+    /// PR-D1: REST polling fallback for `userFills`. Used by the WS subscriber
+    /// supervisor when the live WS stream is unavailable.
+    ///
+    /// `start_ms` / `end_ms` are inclusive milli-epoch bounds. `end_ms = None`
+    /// means "now". HL applies its own server-side cap on result size; callers
+    /// should advance `start_ms` past the highest `time` they already saw to
+    /// avoid duplicate retrieval (the in-process [`crate::ws_state::WsStateManager`]
+    /// also dedupes on `(oid, tid)` so duplicates are safe but wasteful).
+    async fn fetch_user_fills_by_time(
+        &self,
+        agent: &Address,
+        start_ms: u64,
+        end_ms: Option<u64>,
+    ) -> Result<Vec<crate::wire_ws::WireWsFill>, HlError>;
 }
 
 /// `MockHlClient` records calls in memory and returns Ok responses. Used for
@@ -377,6 +392,17 @@ impl HlClient for MockHlClient {
             })
             .collect();
         Ok(resp)
+    }
+
+    async fn fetch_user_fills_by_time(
+        &self,
+        _agent: &Address,
+        _start_ms: u64,
+        _end_ms: Option<u64>,
+    ) -> Result<Vec<crate::wire_ws::WireWsFill>, HlError> {
+        // Mock returns empty by default; tests can extend later if a fixture
+        // is needed for the REST fallback path.
+        Ok(Vec::new())
     }
 }
 
@@ -747,6 +773,28 @@ impl HlClient for RealHlClient {
         }
 
         unwrap_response_slots(responses)
+    }
+
+    async fn fetch_user_fills_by_time(
+        &self,
+        agent: &Address,
+        start_ms: u64,
+        end_ms: Option<u64>,
+    ) -> Result<Vec<crate::wire_ws::WireWsFill>, HlError> {
+        // HL info weight: ~20 (similar to other user-scoped queries).
+        let _wait = self.rate_limiter.acquire(20).await;
+        let mut body = serde_json::json!({
+            "type": "userFillsByTime",
+            "user": agent.as_str(),
+            "startTime": start_ms,
+        });
+        if let Some(end) = end_ms {
+            body["endTime"] = serde_json::Value::Number(end.into());
+        }
+        let resp = self.post_info(&body).await?;
+        let fills: Vec<crate::wire_ws::WireWsFill> = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("userFillsByTime: {e}")))?;
+        Ok(fills)
     }
 }
 
