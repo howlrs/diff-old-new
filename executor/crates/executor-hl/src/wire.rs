@@ -95,3 +95,53 @@ pub struct WireCumFunding {
     #[serde(with = "rust_decimal::serde::str")]
     pub since_change: Decimal,
 }
+
+/// HL `openOrders` array element.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireOpenOrder {
+    pub coin: String,
+    pub side: WireOrderSide,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub limit_px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub sz: Decimal,
+    pub oid: u64,
+    /// HL wire is ms epoch (number).
+    pub timestamp: i64,
+}
+
+/// HL `frontendOpenOrders` array element (superset of openOrders).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFrontendOpenOrder {
+    pub coin: String,
+    pub side: WireOrderSide,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub limit_px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub sz: Decimal,
+    pub oid: u64,
+    pub timestamp: i64,
+    /// Order type label, e.g. "Limit", "Trigger". Free string in spec.
+    pub order_type: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub orig_sz: Decimal,
+    #[serde(default)]
+    pub reduce_only: bool,
+    #[serde(default)]
+    pub is_trigger: bool,
+    #[serde(default)]
+    pub is_position_tpsl: bool,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub trigger_px: Option<Decimal>,
+    #[serde(default)]
+    pub trigger_condition: Option<String>,
+}
+
+/// HL wire side: A = ask = sell, B = bid = buy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum WireOrderSide {
+    A,
+    B,
+}
