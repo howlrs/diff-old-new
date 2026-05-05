@@ -18,6 +18,7 @@ pub mod errors;
 pub mod hl_client;
 pub mod rate_limiter;
 pub mod signer;
+pub mod wire;
 pub mod ws_state;
 
 pub use batch_sender::{BatchSender, BatchSenderConfig, OrderOrCancel};
