@@ -93,6 +93,7 @@ pub struct StartExecResponse {
 
 pub async fn start_exec(
     State(s): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<StartExecRequest>,
 ) -> Result<Json<StartExecResponse>, ServerError> {
     // PR-C3: refuse new work after an emergency_stop has been initiated.
@@ -105,6 +106,19 @@ pub async fn start_exec(
     }
 
     validate_algorithm_name(&req.algorithm)?;
+
+    // PR-C4: audit chain — every operator-driven POST gets logged with the
+    // operator id. The client must opt in via `ExecutorClient(operator_id=...)`.
+    let operator = headers
+        .get("x-operator-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    tracing::info!(
+        operator,
+        algorithm = %req.algorithm,
+        symbol = %req.symbol,
+        "start_exec",
+    );
 
     // PR-C2 Layer 1 (REST entry): symbol allow-list + rough notional cap using
     // book.best_bid as the reference price. Strict per-order check happens at
@@ -228,6 +242,7 @@ pub struct CancelExecResponse {
 
 pub async fn cancel_exec(
     State(s): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<CancelExecResponse>, ServerError> {
     let exec_id = parse_exec_id(&id)?;
@@ -238,6 +253,11 @@ pub async fn cancel_exec(
         .ok_or_else(|| ServerError::NotFound(id.clone()))?;
     let h = entry.read().await;
     let _ = h.abort.send(true);
+    let operator = headers
+        .get("x-operator-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    tracing::info!(operator, exec_id = %exec_id.0, "cancel_exec");
     Ok(Json(CancelExecResponse {
         exec_id,
         abort_signaled: true,
