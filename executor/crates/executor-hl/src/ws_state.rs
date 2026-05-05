@@ -3,11 +3,13 @@
 //! The networked WS subscriber is added in PR-7 (server). This module exposes
 //! a pure update function so unit tests can drive state without sockets.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use executor_core::cloid::Cloid;
 use executor_core::state::{AppState, BookLevel, OpenOrder, OrderBook};
@@ -33,6 +35,10 @@ pub struct WsFill {
     pub coin: Symbol,
     pub cloid: Option<Cloid>,
     pub oid: u64,
+    /// HL `tid` (trade id). Required for dedup between WS and REST polling
+    /// fallback — partial fills against the same `oid` produce multiple
+    /// distinct `tid`s, so `cloid` alone is insufficient (Gemini deep S1).
+    pub tid: u64,
     pub side: Side,
     pub px: Decimal,
     pub sz: Decimal,
@@ -67,14 +73,22 @@ pub enum WsOrderStatus {
     Rejected,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WsStateManager {
     state: Arc<AppState>,
+    /// Dedup set for fills observed from BOTH the WS feed AND the REST polling
+    /// fallback. Key is `(oid, tid)` because partial fills against the same
+    /// order produce multiple distinct trade ids. Cloid alone is insufficient.
+    /// Gemini deep S1 (2026-05-05): cloid-based dedup is a critical bug.
+    seen_trade_ids: RwLock<HashSet<(OrderId, u64)>>,
 }
 
 impl WsStateManager {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            seen_trade_ids: RwLock::new(HashSet::new()),
+        }
     }
 
     /// Apply a single WS message. All updates are short critical sections.
@@ -116,6 +130,20 @@ impl WsStateManager {
     }
 
     async fn apply_fill(&self, f: WsFill) {
+        // PR-D1 Gemini deep S1: dedup BEFORE writing. WS and REST fallback
+        // can both deliver the same trade. (oid, tid) is the unique key —
+        // cloid alone misses partial fills.
+        {
+            let mut seen = self.seen_trade_ids.write().await;
+            if !seen.insert((OrderId(f.oid), f.tid)) {
+                tracing::trace!(
+                    oid = f.oid,
+                    tid = f.tid,
+                    "ws_state: duplicate fill, ignoring"
+                );
+                return;
+            }
+        }
         let fill = Fill {
             symbol: f.coin.clone(),
             cloid: f.cloid,
@@ -182,6 +210,65 @@ impl WsStateManager {
     pub async fn register_open_order(&self, order: OpenOrder) {
         let mut g = self.state.open_orders.write().await;
         g.insert(order.cloid, order);
+    }
+
+    /// PR-D1 reconcile: overwrite `AppState.position` and `AppState.open_orders`
+    /// from a fresh REST snapshot.
+    ///
+    /// `recent_fills` is intentionally not touched (it's append-only history,
+    /// dedup'd by (oid,tid) — REST polling fallback handles fill recovery).
+    /// `seen_trade_ids` is also untouched: a reconnect doesn't invalidate
+    /// dedup state.
+    pub async fn reconcile(
+        &self,
+        open_orders_snapshot: Vec<crate::hl_client::HlOpenOrder>,
+        account_snapshot: crate::hl_client::AccountStateSnapshot,
+    ) {
+        // Replace positions wholesale.
+        {
+            let mut g = self.state.position.write().await;
+            *g = account_snapshot.positions.clone();
+        }
+        // Replace open_orders, but preserve any cloid we recorded locally
+        // (HL's openOrders endpoint doesn't echo cloid, so an in-memory cloid
+        // that hasn't yet been ack'd via WS would be lost otherwise).
+        {
+            let mut g = self.state.open_orders.write().await;
+            // Build a temporary index of existing cloid → oid so we can match.
+            let mut by_oid: std::collections::HashMap<u64, Cloid> =
+                std::collections::HashMap::new();
+            for (cloid, oo) in g.iter() {
+                if let Some(OrderId(oid)) = oo.oid {
+                    by_oid.insert(oid, *cloid);
+                }
+            }
+            // Build the new map from REST snapshot.
+            let mut new_map: std::collections::HashMap<Cloid, OpenOrder> =
+                std::collections::HashMap::new();
+            for o in &open_orders_snapshot {
+                let cloid = by_oid.get(&o.oid.0).copied().unwrap_or_else(Cloid::new);
+                new_map.insert(
+                    cloid,
+                    OpenOrder {
+                        cloid,
+                        oid: Some(o.oid),
+                        symbol: o.symbol.clone(),
+                        side: o.side,
+                        px: o.limit_px,
+                        sz: o.sz,
+                        filled_sz: Decimal::ZERO,
+                        tif: Tif::Gtc,
+                        reduce_only: false,
+                        placed_at: o.timestamp,
+                    },
+                );
+            }
+            *g = new_map;
+        }
+        // health.last_reconciliation
+        if let Ok(mut h) = self.state.health.try_write() {
+            h.last_reconciliation = Some(Utc::now());
+        }
     }
 }
 
@@ -259,6 +346,7 @@ mod tests {
             coin: Symbol::new("BTC"),
             cloid: Some(cloid),
             oid: 1,
+            tid: 1001,
             side: Side::Long,
             px: dec!(100),
             sz: dec!(0.4),
@@ -276,6 +364,7 @@ mod tests {
             coin: Symbol::new("BTC"),
             cloid: Some(cloid),
             oid: 1,
+            tid: 1002,
             side: Side::Long,
             px: dec!(100),
             sz: dec!(0.6),
@@ -301,6 +390,41 @@ mod tests {
         let pos = state.position.read().await;
         let p = pos.get(&Symbol::new("BTC")).unwrap();
         assert_eq!(p.size, dec!(2.5));
+    }
+
+    #[tokio::test]
+    async fn apply_fill_dedup_skips_duplicate_oid_tid() {
+        let state = Arc::new(AppState::new());
+        let mgr = WsStateManager::new(state.clone());
+        let cloid = Cloid::new();
+        mgr.register_open_order(open_order_from_intent(&intent(cloid), None))
+            .await;
+        let f = WsFill {
+            coin: Symbol::new("BTC"),
+            cloid: Some(cloid),
+            oid: 7,
+            tid: 9001,
+            side: Side::Long,
+            px: dec!(50000),
+            sz: dec!(0.3),
+            fee: dec!(0.001),
+        };
+        mgr.apply(WsMessage::UserFill(f.clone())).await;
+        // Same (oid, tid) — must be ignored, recent_fills count unchanged.
+        mgr.apply(WsMessage::UserFill(f.clone())).await;
+        // Read + drop in a scope so the next `apply` call can acquire the
+        // write lock. Holding `read()` across an `await` that itself takes
+        // `write()` deadlocks tokio's RwLock.
+        {
+            let fills = state.recent_fills.read().await;
+            assert_eq!(fills.len(), 1, "duplicate (oid,tid) must dedup");
+        }
+
+        // Different tid — must be applied.
+        let f2 = WsFill { tid: 9002, ..f };
+        mgr.apply(WsMessage::UserFill(f2)).await;
+        let fills = state.recent_fills.read().await;
+        assert_eq!(fills.len(), 2, "distinct tid must record");
     }
 
     #[tokio::test]

@@ -24,6 +24,8 @@ use executor_hl::batch_sender::{spawn_batch_sender_with_gate, BatchSenderConfig}
 use executor_hl::hl_client::{HlClient, HlConfig, MockHlClient, RealHlClient};
 use executor_hl::meta::MetaCache;
 use executor_hl::signer::{Eip712AgentSigner, MockSigner, Signer};
+use executor_hl::ws_state::WsStateManager;
+use executor_hl::ws_subscriber::{spawn_ws_subscriber, WsSubscriberConfig};
 use executor_hl::IntentChecker;
 use executor_server::{build_app, BaselineGuard, SafetyGate, ServerState};
 use rust_decimal::Decimal;
@@ -88,6 +90,16 @@ struct Args {
     /// auto-fires `emergency_stop`.
     #[arg(long, env = "EXECUTOR_BASELINE_MAX_CONSEC_ERRORS", default_value_t = 5)]
     baseline_max_consec_errors: u32,
+
+    /// PR-D1: l2Book symbols to subscribe over WS when `--mainnet-allow-symbols`
+    /// is `*` (allow-all). Comma-separated. Without this fallback we wouldn't
+    /// know which books to subscribe in the wildcard case.
+    #[arg(
+        long,
+        env = "EXECUTOR_WS_L2_SYMBOLS_FALLBACK",
+        default_value = "ETH,BTC"
+    )]
+    ws_l2_symbols_fallback: String,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -188,14 +200,60 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let state = Arc::new(ServerState::new(
-        app_state,
+    let mut state_owned = ServerState::new(
+        app_state.clone(),
         hl_client,
-        signer,
+        signer.clone(),
         batch_sender,
         batch_handle,
-        safety,
-    ));
+        safety.clone(),
+    );
+
+    // PR-D1: spawn WS subscriber in real mode. Mock mode keeps the disabled
+    // ws_status default — health endpoint reports `ws_connected: false`.
+    if matches!(args.mode, Mode::Real) {
+        let agent_addr = signer.address();
+        let master_addr_str = args
+            .master_address
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!(
+                "--master-address (or HL_MASTER_ADDRESS env) required for --mode real (used by WS reconcile)"
+            ))?;
+        let master_addr = Address::new(master_addr_str);
+        let symbols: Vec<executor_core::symbol::Symbol> = match safety.allow_symbols.as_ref() {
+            Some(allow) if !allow.is_empty() => allow.iter().cloned().collect(),
+            _ => args
+                .ws_l2_symbols_fallback
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(executor_core::symbol::Symbol::new)
+                .collect(),
+        };
+        let ws_url = match args.base {
+            Base::Mainnet => "wss://api.hyperliquid.xyz/ws".to_string(),
+            Base::Testnet => "wss://api.hyperliquid-testnet.xyz/ws".to_string(),
+        };
+        tracing::info!(
+            agent = %agent_addr,
+            master = %master_addr,
+            symbols = ?symbols,
+            url = %ws_url,
+            "ws_subscriber: spawning",
+        );
+        let ws_cfg = WsSubscriberConfig {
+            url: ws_url,
+            agent_address: agent_addr,
+            master_address: master_addr,
+            symbols,
+            ..Default::default()
+        };
+        let manager = Arc::new(WsStateManager::new(app_state.clone()));
+        let ws_handle = spawn_ws_subscriber(ws_cfg, manager, state_owned.hl_client.clone());
+        state_owned.install_ws_subscriber(ws_handle);
+    }
+
+    let state = Arc::new(state_owned);
 
     // PR-C3: capture baseline + spawn tick task. Real mode only.
     if matches!(args.mode, Mode::Real) && args.baseline_guard {

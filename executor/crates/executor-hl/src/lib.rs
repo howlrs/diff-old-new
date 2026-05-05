@@ -22,7 +22,9 @@ pub mod meta;
 pub mod rate_limiter;
 pub mod signer;
 pub mod wire;
+pub mod wire_ws;
 pub mod ws_state;
+pub mod ws_subscriber;
 
 pub use batch_sender::{BatchSender, BatchSenderConfig, OrderOrCancel};
 pub use errors::HlError;
@@ -33,4 +35,6 @@ pub use hl_client::{
 pub use intent_checker::IntentChecker;
 pub use rate_limiter::TokenBucket;
 pub use signer::{Eip712AgentSigner, MockSigner, Signature, Signer};
+pub use wire_ws::{decode_frame as ws_decode_frame, WsFrame};
 pub use ws_state::WsStateManager;
+pub use ws_subscriber::{spawn_ws_subscriber, WsStatus, WsSubscriberConfig, WsSubscriberHandle};

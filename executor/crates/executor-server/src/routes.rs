@@ -37,7 +37,18 @@ pub struct HealthResponse {
 pub async fn health(
     State(s): State<Arc<ServerState>>,
 ) -> Result<Json<HealthResponse>, ServerError> {
-    let h = s.app_state.health.read().await.clone();
+    use std::sync::atomic::Ordering;
+    let mut h = s.app_state.health.read().await.clone();
+    // PR-D1: refresh ws_* fields from the live WsStatus snapshot. The
+    // WsStateManager updates `last_user_event` and `ws_message_count` on
+    // every applied frame, but `connected` and `reconnect_count` only
+    // change when the supervisor reconnects, so we read those eagerly.
+    h.ws_connected = s.ws_status.connected.load(Ordering::Acquire);
+    h.ws_reconnect_count = s.ws_status.reconnect_count.load(Ordering::Acquire);
+    let ws_msg = s.ws_status.message_count.load(Ordering::Acquire);
+    if ws_msg > h.ws_message_count {
+        h.ws_message_count = ws_msg;
+    }
     let running = s.registry.list().await.len();
     Ok(Json(HealthResponse {
         status: "ok",
