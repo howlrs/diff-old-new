@@ -409,9 +409,25 @@ impl RealHlClient {
 
     /// Backwards-compatible alias. Existing callers used `new(config, signer)`
     /// with the implicit assumption that meta would be filled in later.
-    /// New code should use `bootstrap` + `with_meta` explicitly.
+    /// New code should use [`connect_async`] (preferred) or
+    /// `bootstrap` + `with_meta` explicitly.
     pub fn new(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
         Self::bootstrap(config, signer)
+    }
+
+    /// Production factory: bootstrap → MetaCache::build → with_meta in one call.
+    /// Returns a fully-initialized client with a populated MetaCache so callers
+    /// don't have to reproduce the 2-step dance and risk forgetting `with_meta`.
+    /// `dexes = &[None]` covers default perp dex; pass `&[None, Some("xyz")]`
+    /// etc. for HIP-3 builder dexes.
+    pub async fn connect_async(
+        config: HlConfig,
+        signer: Arc<dyn Signer>,
+        dexes: &[Option<&str>],
+    ) -> Result<Self, HlError> {
+        let bootstrap = Self::bootstrap(config, signer);
+        let meta = std::sync::Arc::new(crate::meta::MetaCache::build(&bootstrap, dexes).await?);
+        Ok(bootstrap.with_meta(meta))
     }
 
     /// Resolve a symbol to its asset index using the cached meta.
@@ -576,7 +592,7 @@ impl HlClient for RealHlClient {
         }
 
         if wires_with_idx.is_empty() {
-            return Ok(responses.into_iter().flatten().collect());
+            return unwrap_response_slots(responses);
         }
 
         let order_wires: Vec<crate::eip712::OrderWire> =
@@ -618,7 +634,7 @@ impl HlClient for RealHlClient {
             responses[*i] = Some(resp);
         }
 
-        Ok(responses.into_iter().flatten().collect())
+        unwrap_response_slots(responses)
     }
 
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError> {
@@ -671,7 +687,7 @@ impl HlClient for RealHlClient {
         }
 
         if wires_with_idx.is_empty() {
-            return Ok(responses.into_iter().flatten().collect());
+            return unwrap_response_slots(responses);
         }
 
         let cancel_wires: Vec<crate::eip712::CancelByCloidWire> =
@@ -709,7 +725,7 @@ impl HlClient for RealHlClient {
             responses[*i] = Some(resp);
         }
 
-        Ok(responses.into_iter().flatten().collect())
+        unwrap_response_slots(responses)
     }
 }
 
@@ -729,6 +745,29 @@ fn json_to_err_string(v: &serde_json::Value) -> String {
     } else {
         v.to_string()
     }
+}
+
+/// Collapse `Vec<Option<OrderResponse>>` into `Vec<OrderResponse>` while
+/// fail-fast on any unexpected `None` slot. After place_orders/cancel_orders
+/// rebuild responses by index, every slot MUST be populated; a `None` would
+/// indicate an internal bug (mismatched parsed length, etc.) and we surface
+/// it as `HlError::InvalidResponse` rather than silently shrinking the output.
+fn unwrap_response_slots(
+    responses: Vec<Option<OrderResponse>>,
+) -> Result<Vec<OrderResponse>, HlError> {
+    let n = responses.len();
+    let mut out = Vec::with_capacity(n);
+    for (i, slot) in responses.into_iter().enumerate() {
+        match slot {
+            Some(r) => out.push(r),
+            None => {
+                return Err(HlError::InvalidResponse(format!(
+                    "internal: response slot {i} of {n} unfilled (parse vs input length mismatch?)"
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Top-level `{"status":"err", "response": "<msg>"}` returns `Err(HlError::Exchange)`.
