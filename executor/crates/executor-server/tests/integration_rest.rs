@@ -19,13 +19,17 @@ use executor_core::symbol::Symbol;
 use executor_hl::batch_sender::{spawn_batch_sender, BatchSenderConfig};
 use executor_hl::hl_client::MockHlClient;
 use executor_hl::signer::MockSigner;
-use executor_server::{build_app, ServerState};
+use executor_server::{build_app, SafetyGate, ServerState};
 
 fn lvl(px: rust_decimal::Decimal, sz: rust_decimal::Decimal) -> BookLevel {
     BookLevel { px, sz, n: 1 }
 }
 
 async fn build_state_with_seed() -> (Arc<ServerState>, Arc<MockHlClient>) {
+    build_state_with_safety(SafetyGate::disabled()).await
+}
+
+async fn build_state_with_safety(safety: SafetyGate) -> (Arc<ServerState>, Arc<MockHlClient>) {
     let app_state = Arc::new(AppState::new());
     {
         let mut b = app_state.book.write().await;
@@ -63,6 +67,7 @@ async fn build_state_with_seed() -> (Arc<ServerState>, Arc<MockHlClient>) {
         signer,
         batch_sender,
         batch_handle,
+        Arc::new(safety),
     ));
     (state, mock_hl)
 }
@@ -371,4 +376,114 @@ async fn positions_returns_seeded() {
     let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(v["positions"]["BTC"].is_object());
+}
+
+// ---- PR-C2: SafetyGate Layer 1 (REST entry) ----
+
+#[tokio::test]
+async fn start_exec_symbol_not_allowed_400() {
+    // Allow-list = {BTC}; request comes in for ETH → 400.
+    let safety = SafetyGate::from_args("BTC", None, false).unwrap();
+    let (state, _) = build_state_with_safety(safety).await;
+    let app = build_app(state);
+
+    let req_body = json!({
+        "algorithm": "market",
+        "symbol": "ETH",
+        "intent": "open",
+        "target_size": "0.001",
+        "params": {}
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/exec")
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let msg = v["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("safety_gate") && msg.contains("symbol_not_allowed"),
+        "unexpected message: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn start_exec_notional_exceeded_400() {
+    // Allow-list = {BTC}; cap = $10. Seeded book best_bid = $49999.
+    // target_size = 0.001 → notional ≈ $50 → 400.
+    let safety = SafetyGate::from_args("BTC", Some(10), false).unwrap();
+    let (state, _) = build_state_with_safety(safety).await;
+    let app = build_app(state);
+
+    let req_body = json!({
+        "algorithm": "market",
+        "symbol": "BTC",
+        "intent": "open",
+        "target_size": "0.001",
+        "params": {}
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/exec")
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let msg = v["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("safety_gate") && msg.contains("notional_exceeded"),
+        "unexpected message: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn start_exec_within_caps_200() {
+    // Allow-list = {BTC}; cap = $100. Seeded book best_bid = $49999.
+    // target_size = 0.0001 → notional ≈ $5 → 200.
+    let safety = SafetyGate::from_args("BTC", Some(100), false).unwrap();
+    let (state, _) = build_state_with_safety(safety).await;
+    let app = build_app(state);
+
+    let req_body = json!({
+        "algorithm": "market",
+        "symbol": "BTC",
+        "intent": "open",
+        "target_size": "0.0001",
+        "params": {
+            "max_book_age_ms": 0,
+            "slice_timeout_ms": 50,
+            "max_attempts": 1
+        }
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/exec")
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "within-cap request should pass"
+    );
 }

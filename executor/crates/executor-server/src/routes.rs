@@ -96,6 +96,19 @@ pub async fn start_exec(
     Json(req): Json<StartExecRequest>,
 ) -> Result<Json<StartExecResponse>, ServerError> {
     validate_algorithm_name(&req.algorithm)?;
+
+    // PR-C2 Layer 1 (REST entry): symbol allow-list + rough notional cap using
+    // book.best_bid as the reference price. Strict per-order check happens at
+    // BatchSender enqueue time (Layer 2).
+    let symbol = Symbol::new(req.symbol.clone());
+    let ref_px = {
+        let book_g = s.app_state.book.read().await;
+        book_g.get(&symbol).and_then(|b| b.best_bid())
+    };
+    s.safety
+        .check_request(&symbol, req.target_size, ref_px)
+        .map_err(|v| ServerError::BadRequest(format!("safety_gate: {v}")))?;
+
     let mut algo = OrderRouter::build(&req.algorithm)?;
     let exec_id = ExecutionId::new();
 
@@ -111,7 +124,6 @@ pub async fn start_exec(
         }
     });
 
-    let symbol = Symbol::new(req.symbol);
     let ctx = ExecutionContext {
         exec_id,
         symbol,

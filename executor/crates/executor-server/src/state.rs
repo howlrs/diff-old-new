@@ -12,6 +12,7 @@ use executor_hl::hl_client::HlClient;
 use executor_hl::signer::Signer;
 
 use crate::registry::ExecutionRegistry;
+use crate::safety::SafetyGate;
 
 /// Server-side state. `Arc<ServerState>` is shared via `with_state`.
 pub struct ServerState {
@@ -21,6 +22,7 @@ pub struct ServerState {
     pub batch_sender: BatchSender,
     pub batch_handle: tokio::sync::Mutex<Option<BatchSenderHandle>>,
     pub registry: ExecutionRegistry,
+    pub safety: Arc<SafetyGate>,
 }
 
 impl ServerState {
@@ -30,6 +32,7 @@ impl ServerState {
         signer: Arc<dyn Signer>,
         batch_sender: BatchSender,
         batch_handle: BatchSenderHandle,
+        safety: Arc<SafetyGate>,
     ) -> Self {
         Self {
             app_state,
@@ -38,6 +41,7 @@ impl ServerState {
             batch_sender,
             batch_handle: tokio::sync::Mutex::new(Some(batch_handle)),
             registry: ExecutionRegistry::new(),
+            safety,
         }
     }
 }
@@ -47,6 +51,7 @@ impl std::fmt::Debug for ServerState {
         f.debug_struct("ServerState")
             .field("app_state", &self.app_state)
             .field("registry", &self.registry)
+            .field("safety", &self.safety)
             .finish_non_exhaustive()
     }
 }
