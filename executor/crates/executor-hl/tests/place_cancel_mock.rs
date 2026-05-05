@@ -258,9 +258,8 @@ async fn place_orders_unknown_symbol_returns_error_response_no_http() {
     // RealHlClient::bootstrap() has an EMPTY MetaCache. Any symbol → UnknownSymbol.
     // Verify (a) the response is an error with "unknown symbol" message,
     // (b) no HTTP request is made (the mock server gets zero hits).
-    let signer = Arc::new(
-        Eip712AgentSigner::from_secret(SecretString::new(TEST_PK.into()), false).unwrap(),
-    );
+    let signer =
+        Arc::new(Eip712AgentSigner::from_secret(SecretString::new(TEST_PK.into()), false).unwrap());
     let server = mockito::Server::new_async().await;
     // Note: NO `.mock("POST", "/exchange")` — if the code calls /exchange
     // mockito will return 501 and the test will fail in a useful way.
@@ -278,11 +277,7 @@ async fn place_orders_unknown_symbol_returns_error_response_no_http() {
     assert_eq!(resp[0].status, "error");
     assert_eq!(resp[0].cloid, cloid);
     assert!(
-        resp[0]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("unknown symbol"),
+        resp[0].error.as_deref().unwrap().contains("unknown symbol"),
         "expected 'unknown symbol' in error: {:?}",
         resp[0].error
     );

@@ -560,8 +560,7 @@ impl HlClient for RealHlClient {
         for (i, intent) in orders.iter().enumerate() {
             match self.resolve_asset(&intent.symbol) {
                 Ok(asset) => {
-                    wires_with_idx
-                        .push((i, crate::eip712::order_intent_to_wire(intent, asset)));
+                    wires_with_idx.push((i, crate::eip712::order_intent_to_wire(intent, asset)));
                 }
                 Err(HlError::UnknownSymbol(sym)) => {
                     tracing::error!(symbol = %sym, "place_orders: unknown symbol; dropping");
@@ -609,8 +608,10 @@ impl HlClient for RealHlClient {
         // Parse only the orders that were actually sent. Build a Vec<OrderIntent>
         // matching wires_with_idx order so parse_exchange_response can attribute
         // each parsed status to the originating intent's cloid.
-        let sent_intents_owned: Vec<OrderIntent> =
-            wires_with_idx.iter().map(|(i, _)| orders[*i].clone()).collect();
+        let sent_intents_owned: Vec<OrderIntent> = wires_with_idx
+            .iter()
+            .map(|(i, _)| orders[*i].clone())
+            .collect();
         let parsed = parse_exchange_response(&resp_text, &sent_intents_owned)?;
 
         for ((i, _), resp) in wires_with_idx.iter().zip(parsed) {
@@ -620,10 +621,7 @@ impl HlClient for RealHlClient {
         Ok(responses.into_iter().flatten().collect())
     }
 
-    async fn cancel_orders(
-        &self,
-        cancels: &[CancelIntent],
-    ) -> Result<Vec<OrderResponse>, HlError> {
+    async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError> {
         if cancels.is_empty() {
             return Ok(Vec::new());
         }
@@ -701,8 +699,10 @@ impl HlClient for RealHlClient {
 
         let resp_text = self.post_exchange(&body).await?;
 
-        let sent_cancels_owned: Vec<CancelIntent> =
-            wires_with_idx.iter().map(|(i, _)| cancels[*i].clone()).collect();
+        let sent_cancels_owned: Vec<CancelIntent> = wires_with_idx
+            .iter()
+            .map(|(i, _)| cancels[*i].clone())
+            .collect();
         let parsed = parse_cancel_response(&resp_text, &sent_cancels_owned)?;
 
         for ((i, _), resp) in wires_with_idx.iter().zip(parsed) {
