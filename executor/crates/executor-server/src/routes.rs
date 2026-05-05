@@ -95,6 +95,15 @@ pub async fn start_exec(
     State(s): State<Arc<ServerState>>,
     Json(req): Json<StartExecRequest>,
 ) -> Result<Json<StartExecResponse>, ServerError> {
+    // PR-C3: refuse new work after an emergency_stop has been initiated.
+    if s.shutdown_initiated
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err(ServerError::ServiceUnavailable(
+            "executor is in emergency_stop state; restart required".into(),
+        ));
+    }
+
     validate_algorithm_name(&req.algorithm)?;
 
     // PR-C2 Layer 1 (REST entry): symbol allow-list + rough notional cap using
@@ -243,27 +252,33 @@ pub struct EmergencyStopResponse {
     pub cancelled_orders: usize,
 }
 
-/// `POST /v1/emergency_stop` — kill switch.
+/// Idempotent kill-switch shared by the HTTP handler (`emergency_stop`) and the
+/// PR-C3 `BaselineGuard` tick task. The first caller wins via a
+/// `compare_exchange` on `ServerState::shutdown_initiated`; subsequent callers
+/// observe `(0, 0)` and a "already initiated" log line.
 ///
 /// Gemini PR-8 review: order matters. Cancel resting orders FIRST so they
 /// stop trading even if a still-running algo is about to enqueue more —
-/// then abort the algos so they don't repost. Both signals are dispatched
-/// before the function returns; the actual cancellation hits HL on the
-/// next BatchSender flush (≤100 ms).
+/// then abort the algos so they don't repost.
 ///
-/// Operator auditability: the request may set `X-Operator-ID` so the log
-/// line records who triggered the stop.
-pub async fn emergency_stop(
-    State(s): State<Arc<ServerState>>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<EmergencyStopResponse>, ServerError> {
+/// Gemini PR-C3 review: idempotency is required because both the HTTP path
+/// (operator manual trigger) and the guard path (auto-trigger on baseline
+/// drift) can race.
+pub async fn execute_emergency_stop(s: &Arc<ServerState>, operator: &str) -> EmergencyStopResponse {
     use executor_core::intent::CancelIntent;
     use executor_hl::batch_sender::OrderOrCancel;
+    use std::sync::atomic::Ordering;
 
-    let operator = headers
-        .get("x-operator-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown");
+    if s.shutdown_initiated
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        tracing::info!(operator, "emergency_stop: already initiated, skipping");
+        return EmergencyStopResponse {
+            aborted_executions: 0,
+            cancelled_orders: 0,
+        };
+    }
 
     // Step 1: snapshot open orders + enqueue cancels (cancel before abort).
     let open_orders: Vec<_> = {
@@ -294,10 +309,26 @@ pub async fn emergency_stop(
         cancelled_orders = cancelled,
         "emergency_stop dispatched"
     );
-    Ok(Json(EmergencyStopResponse {
+    EmergencyStopResponse {
         aborted_executions,
         cancelled_orders: cancelled,
-    }))
+    }
+}
+
+/// `POST /v1/emergency_stop` — kill switch.
+///
+/// Operator auditability: the request may set `X-Operator-ID` so the log
+/// line records who triggered the stop.
+pub async fn emergency_stop(
+    State(s): State<Arc<ServerState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<EmergencyStopResponse>, ServerError> {
+    let operator = headers
+        .get("x-operator-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    Ok(Json(execute_emergency_stop(&s, &operator).await))
 }
 
 fn parse_exec_id(s: &str) -> Result<ExecutionId, ServerError> {
