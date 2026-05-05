@@ -222,7 +222,6 @@ mod tests {
         OrderIntent {
             cloid,
             symbol: Symbol::new("BTC"),
-            asset: 0,
             side: Side::Long,
             px: dec!(100),
             sz: dec!(1),
