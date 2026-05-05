@@ -277,8 +277,6 @@ impl Algorithm for MarketAlgorithm {
             let order = OrderIntent {
                 cloid,
                 symbol: ctx.symbol.clone(),
-                // TODO(PR-B2b): resolve via meta cache (currently placeholder)
-                asset: 0,
                 side,
                 px: limit_px,
                 sz: remaining,

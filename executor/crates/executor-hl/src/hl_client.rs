@@ -375,10 +375,18 @@ pub struct RealHlClient {
     pub signer: Arc<dyn Signer>,
     pub rate_limiter: Arc<TokenBucket>,
     pub http: reqwest::Client,
+    /// PR-C1: pre-built symbol → asset cache. `RealHlClient::bootstrap()`
+    /// initializes this empty so `fetch_meta()` can be called to BUILD the
+    /// cache; `with_meta()` upgrades it. After `with_meta`, this is the
+    /// authoritative source for asset resolution in place/cancel.
+    pub meta: Arc<crate::meta::MetaCache>,
 }
 
 impl RealHlClient {
-    pub fn new(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
+    /// Construct a client with an EMPTY MetaCache. Use this when you need
+    /// to call `fetch_meta()` to build the real cache; afterward, call
+    /// `with_meta()` to produce a production-ready client.
+    pub fn bootstrap(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
         let http = reqwest::Client::builder()
             .pool_idle_timeout(Some(std::time::Duration::from_secs(60)))
             .timeout(std::time::Duration::from_secs(10))
@@ -389,7 +397,46 @@ impl RealHlClient {
             signer,
             rate_limiter: Arc::new(TokenBucket::hyperliquid_default()),
             http,
+            meta: Arc::new(crate::meta::MetaCache::empty()),
         }
+    }
+
+    /// Replace the MetaCache. Returns a new `RealHlClient` reusing the
+    /// existing http/signer/rate_limiter. Call this after building the cache.
+    pub fn with_meta(self, meta: Arc<crate::meta::MetaCache>) -> Self {
+        Self { meta, ..self }
+    }
+
+    /// Backwards-compatible alias. Existing callers used `new(config, signer)`
+    /// with the implicit assumption that meta would be filled in later.
+    /// New code should use [`connect_async`] (preferred) or
+    /// `bootstrap` + `with_meta` explicitly.
+    pub fn new(config: HlConfig, signer: Arc<dyn Signer>) -> Self {
+        Self::bootstrap(config, signer)
+    }
+
+    /// Production factory: bootstrap → MetaCache::build → with_meta in one call.
+    /// Returns a fully-initialized client with a populated MetaCache so callers
+    /// don't have to reproduce the 2-step dance and risk forgetting `with_meta`.
+    /// `dexes = &[None]` covers default perp dex; pass `&[None, Some("xyz")]`
+    /// etc. for HIP-3 builder dexes.
+    pub async fn connect_async(
+        config: HlConfig,
+        signer: Arc<dyn Signer>,
+        dexes: &[Option<&str>],
+    ) -> Result<Self, HlError> {
+        let bootstrap = Self::bootstrap(config, signer);
+        let meta = std::sync::Arc::new(crate::meta::MetaCache::build(&bootstrap, dexes).await?);
+        Ok(bootstrap.with_meta(meta))
+    }
+
+    /// Resolve a symbol to its asset index using the cached meta.
+    /// Used by both `place_orders` and `cancel_orders` (Task 6).
+    pub(crate) fn resolve_asset(
+        &self,
+        symbol: &executor_core::symbol::Symbol,
+    ) -> Result<u32, HlError> {
+        self.meta.resolve(symbol)
     }
 
     /// POST a JSON body to the /info endpoint and return the response body as a String.
@@ -519,11 +566,37 @@ impl HlClient for RealHlClient {
         let weight = 1 + (orders.len() as u32 / 40);
         let _wait = self.rate_limiter.acquire(weight).await;
 
-        let order_wires: Vec<crate::eip712::OrderWire> = orders
-            .iter()
-            .map(crate::eip712::order_intent_to_wire)
-            .collect();
+        // Resolve each intent's asset; collect resolved (idx, wire) pairs and
+        // immediately-rejected (idx, error_response) pairs so the final output
+        // matches the input order exactly. UnknownSymbol drops a single order;
+        // other Err variants abort the whole batch.
+        let mut responses: Vec<Option<OrderResponse>> = (0..orders.len()).map(|_| None).collect();
+        let mut wires_with_idx: Vec<(usize, crate::eip712::OrderWire)> =
+            Vec::with_capacity(orders.len());
+        for (i, intent) in orders.iter().enumerate() {
+            match self.resolve_asset(&intent.symbol) {
+                Ok(asset) => {
+                    wires_with_idx.push((i, crate::eip712::order_intent_to_wire(intent, asset)));
+                }
+                Err(HlError::UnknownSymbol(sym)) => {
+                    tracing::error!(symbol = %sym, "place_orders: unknown symbol; dropping");
+                    responses[i] = Some(OrderResponse {
+                        cloid: intent.cloid,
+                        oid: None,
+                        status: "error".into(),
+                        error: Some(format!("unknown symbol: {sym}")),
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
+        if wires_with_idx.is_empty() {
+            return unwrap_response_slots(responses);
+        }
+
+        let order_wires: Vec<crate::eip712::OrderWire> =
+            wires_with_idx.iter().map(|(_, w)| w.clone()).collect();
         let action = crate::eip712::OrderAction {
             action_type: "order".into(),
             orders: order_wires,
@@ -537,7 +610,6 @@ impl HlClient for RealHlClient {
             .map(|d| d.as_millis() as u64)
             .unwrap_or_default();
 
-        // PR-B2a: vault always None. PR-B2b will plumb vault through `place_orders`.
         let sig = self.signer.sign_l1(&action_value, nonce, None).await?;
 
         let body = serde_json::json!({
@@ -548,7 +620,21 @@ impl HlClient for RealHlClient {
         });
 
         let resp_text = self.post_exchange(&body).await?;
-        parse_exchange_response(&resp_text, orders)
+
+        // Parse only the orders that were actually sent. Build a Vec<OrderIntent>
+        // matching wires_with_idx order so parse_exchange_response can attribute
+        // each parsed status to the originating intent's cloid.
+        let sent_intents_owned: Vec<OrderIntent> = wires_with_idx
+            .iter()
+            .map(|(i, _)| orders[*i].clone())
+            .collect();
+        let parsed = parse_exchange_response(&resp_text, &sent_intents_owned)?;
+
+        for ((i, _), resp) in wires_with_idx.iter().zip(parsed) {
+            responses[*i] = Some(resp);
+        }
+
+        unwrap_response_slots(responses)
     }
 
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError> {
@@ -559,26 +645,53 @@ impl HlClient for RealHlClient {
         let weight = 1 + (cancels.len() as u32 / 40);
         let _wait = self.rate_limiter.acquire(weight).await;
 
-        // PR-B2a: cancelByCloid only. If `by_cloid` is present we use it
-        // (silently ignoring any `by_oid` to avoid breaking emergency_stop
-        // flows that opportunistically include both). If only `by_oid` is
-        // present (no cloid), we reject — by-oid path arrives in a later PR.
-        let cancel_wires: Result<Vec<crate::eip712::CancelByCloidWire>, HlError> = cancels
-            .iter()
-            .map(|c| match c.by_cloid {
-                Some(cloid) => Ok(crate::eip712::CancelByCloidWire {
-                    asset: c.asset,
-                    cloid: format!("{}", cloid),
-                }),
-                None => Err(HlError::ActionFormat(
-                    "by_oid-only cancel not supported in PR-B2a; CancelIntent must \
-                     include by_cloid (PR-B2b will add by_oid path)"
-                        .into(),
-                )),
-            })
-            .collect();
-        let cancel_wires = cancel_wires?;
+        // Validate by_cloid presence and resolve asset per intent. Same
+        // index-preservation pattern as place_orders.
+        let mut responses: Vec<Option<OrderResponse>> = (0..cancels.len()).map(|_| None).collect();
+        let mut wires_with_idx: Vec<(usize, crate::eip712::CancelByCloidWire)> =
+            Vec::with_capacity(cancels.len());
+        for (i, c) in cancels.iter().enumerate() {
+            // by_oid-only is still rejected (PR-B2a contract; PR-B2b
+            // emergency_stop fix accepts by_cloid + by_oid, using cloid).
+            let cloid = match c.by_cloid {
+                Some(cl) => cl,
+                None => {
+                    return Err(HlError::ActionFormat(
+                        "by_oid-only cancel not supported in PR-B2a; CancelIntent must \
+                         include by_cloid (PR-B2b will add by_oid path)"
+                            .into(),
+                    ));
+                }
+            };
+            match self.resolve_asset(&c.symbol) {
+                Ok(asset) => {
+                    wires_with_idx.push((
+                        i,
+                        crate::eip712::CancelByCloidWire {
+                            asset,
+                            cloid: format!("{cloid}"),
+                        },
+                    ));
+                }
+                Err(HlError::UnknownSymbol(sym)) => {
+                    tracing::error!(symbol = %sym, "cancel_orders: unknown symbol; dropping");
+                    responses[i] = Some(OrderResponse {
+                        cloid,
+                        oid: None,
+                        status: "error".into(),
+                        error: Some(format!("unknown symbol: {sym}")),
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
+        if wires_with_idx.is_empty() {
+            return unwrap_response_slots(responses);
+        }
+
+        let cancel_wires: Vec<crate::eip712::CancelByCloidWire> =
+            wires_with_idx.iter().map(|(_, w)| w.clone()).collect();
         let action = crate::eip712::CancelByCloidAction {
             action_type: "cancelByCloid".into(),
             cancels: cancel_wires,
@@ -601,7 +714,18 @@ impl HlClient for RealHlClient {
         });
 
         let resp_text = self.post_exchange(&body).await?;
-        parse_cancel_response(&resp_text, cancels)
+
+        let sent_cancels_owned: Vec<CancelIntent> = wires_with_idx
+            .iter()
+            .map(|(i, _)| cancels[*i].clone())
+            .collect();
+        let parsed = parse_cancel_response(&resp_text, &sent_cancels_owned)?;
+
+        for ((i, _), resp) in wires_with_idx.iter().zip(parsed) {
+            responses[*i] = Some(resp);
+        }
+
+        unwrap_response_slots(responses)
     }
 }
 
@@ -621,6 +745,29 @@ fn json_to_err_string(v: &serde_json::Value) -> String {
     } else {
         v.to_string()
     }
+}
+
+/// Collapse `Vec<Option<OrderResponse>>` into `Vec<OrderResponse>` while
+/// fail-fast on any unexpected `None` slot. After place_orders/cancel_orders
+/// rebuild responses by index, every slot MUST be populated; a `None` would
+/// indicate an internal bug (mismatched parsed length, etc.) and we surface
+/// it as `HlError::InvalidResponse` rather than silently shrinking the output.
+fn unwrap_response_slots(
+    responses: Vec<Option<OrderResponse>>,
+) -> Result<Vec<OrderResponse>, HlError> {
+    let n = responses.len();
+    let mut out = Vec::with_capacity(n);
+    for (i, slot) in responses.into_iter().enumerate() {
+        match slot {
+            Some(r) => out.push(r),
+            None => {
+                return Err(HlError::InvalidResponse(format!(
+                    "internal: response slot {i} of {n} unfilled (parse vs input length mismatch?)"
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Top-level `{"status":"err", "response": "<msg>"}` returns `Err(HlError::Exchange)`.
@@ -776,7 +923,6 @@ mod tests {
         let oi = OrderIntent {
             cloid: Cloid::new(),
             symbol: Symbol::new("BTC"),
-            asset: 0,
             side: Side::Long,
             px: dec!(50000),
             sz: dec!(0.1),
@@ -789,7 +935,6 @@ mod tests {
         assert_eq!(m.placed_calls().len(), 1);
         let ci = CancelIntent {
             symbol: Symbol::new("BTC"),
-            asset: 0,
             by_cloid: Some(oi.cloid),
             by_oid: None,
         };

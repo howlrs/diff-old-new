@@ -12,6 +12,7 @@ use executor_core::symbol::Symbol;
 use executor_core::types::{OrderId, Side, Tif};
 use executor_hl::errors::HlError;
 use executor_hl::hl_client::{HlClient, HlConfig, RealHlClient};
+use executor_hl::meta::MetaCache;
 use executor_hl::signer::Eip712AgentSigner;
 use rust_decimal_macros::dec;
 use secrecy::SecretString;
@@ -19,22 +20,45 @@ use std::sync::Arc;
 
 const TEST_PK: &str = "0x0123456789012345678901234567890123456789012345678901234567890123";
 
-fn make_client(server_url: &str) -> RealHlClient {
+/// Universe meta JSON used by `make_client` to populate the MetaCache.
+/// Indices: BTC=0, ETH=1 (matching the original `asset: 1` literal for ETH).
+const META_UNIVERSE_BODY: &str = r#"{"universe":[
+    {"name":"BTC","szDecimals":5,"maxLeverage":40,"onlyIsolated":false},
+    {"name":"ETH","szDecimals":4,"maxLeverage":25,"onlyIsolated":false}
+]}"#;
+
+/// Build a `RealHlClient` against the mock server, with a populated
+/// MetaCache (BTC=0, ETH=1). Mocks the `/info meta` endpoint on the server
+/// and consumes one mock; tests are responsible for any /exchange mocks.
+async fn make_client(server: &mut mockito::ServerGuard) -> RealHlClient {
     let signer =
         Arc::new(Eip712AgentSigner::from_secret(SecretString::new(TEST_PK.into()), false).unwrap());
     let config = HlConfig {
-        info_url: format!("{server_url}/info"),
-        exchange_url: format!("{server_url}/exchange"),
+        info_url: format!("{}/info", server.url()),
+        exchange_url: format!("{}/exchange", server.url()),
         ws_url: "ws://unused".into(),
     };
-    RealHlClient::new(config, signer)
+    let _meta_mock = server
+        .mock("POST", "/info")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(META_UNIVERSE_BODY)
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let bootstrap = RealHlClient::bootstrap(config, signer);
+    let meta = Arc::new(
+        MetaCache::build(&bootstrap, &[None])
+            .await
+            .expect("MetaCache::build failed against mocked /info"),
+    );
+    bootstrap.with_meta(meta)
 }
 
 fn make_order_intent() -> OrderIntent {
     OrderIntent {
         cloid: Cloid::new(),
         symbol: Symbol::new("ETH"),
-        asset: 1,
         side: Side::Long,
         px: dec!(2000),
         sz: dec!(0.001),
@@ -46,7 +70,6 @@ fn make_order_intent() -> OrderIntent {
 fn make_cancel_intent(cloid: Cloid) -> CancelIntent {
     CancelIntent {
         symbol: Symbol::new("ETH"),
-        asset: 1,
         by_cloid: Some(cloid),
         by_oid: None,
     }
@@ -65,7 +88,7 @@ async fn place_orders_resting_response_parses_to_oid() {
         .create_async()
         .await;
 
-    let client = make_client(&server.url());
+    let client = make_client(&mut server).await;
     let resp = client.place_orders(&[make_order_intent()]).await.unwrap();
     assert_eq!(resp.len(), 1);
     assert_eq!(resp[0].status, "resting");
@@ -86,7 +109,7 @@ async fn place_orders_filled_response_parses_to_oid_and_filled_status() {
         .create_async()
         .await;
 
-    let client = make_client(&server.url());
+    let client = make_client(&mut server).await;
     let resp = client.place_orders(&[make_order_intent()]).await.unwrap();
     assert_eq!(resp.len(), 1);
     assert_eq!(resp[0].status, "filled");
@@ -107,7 +130,7 @@ async fn place_orders_per_order_error_keeps_cloid_and_attaches_error() {
         .create_async()
         .await;
 
-    let client = make_client(&server.url());
+    let client = make_client(&mut server).await;
     let intent = make_order_intent();
     let cloid = intent.cloid;
     let resp = client.place_orders(&[intent]).await.unwrap();
@@ -127,7 +150,7 @@ async fn place_orders_top_level_err_returns_hl_error_exchange() {
         .create_async()
         .await;
 
-    let client = make_client(&server.url());
+    let client = make_client(&mut server).await;
     let err = client
         .place_orders(&[make_order_intent()])
         .await
@@ -146,8 +169,8 @@ async fn place_orders_top_level_err_returns_hl_error_exchange() {
 
 #[tokio::test]
 async fn place_orders_empty_returns_empty() {
-    let server = mockito::Server::new_async().await;
-    let client = make_client(&server.url());
+    let mut server = mockito::Server::new_async().await;
+    let client = make_client(&mut server).await;
     let resp = client.place_orders(&[]).await.unwrap();
     assert!(resp.is_empty());
 }
@@ -165,7 +188,7 @@ async fn cancel_orders_success_string_response() {
         .create_async()
         .await;
 
-    let client = make_client(&server.url());
+    let client = make_client(&mut server).await;
     let cloid = Cloid::new();
     let resp = client
         .cancel_orders(&[make_cancel_intent(cloid)])
@@ -179,12 +202,12 @@ async fn cancel_orders_success_string_response() {
 
 #[tokio::test]
 async fn cancel_orders_by_oid_only_returns_action_format_error() {
-    let server = mockito::Server::new_async().await;
-    // No mock needed — the error fires before any HTTP call.
-    let client = make_client(&server.url());
+    let mut server = mockito::Server::new_async().await;
+    // by_oid-only error fires before resolve_asset, but make_client still
+    // mocks /info to populate the MetaCache for consistency with other tests.
+    let client = make_client(&mut server).await;
     let cancel = CancelIntent {
         symbol: Symbol::new("ETH"),
-        asset: 1,
         by_cloid: None,
         by_oid: Some(OrderId(99999)),
     };
@@ -216,11 +239,10 @@ async fn cancel_orders_by_cloid_with_oid_present_uses_cloid_path() {
         .create_async()
         .await;
 
-    let client = make_client(&server.url());
+    let client = make_client(&mut server).await;
     let cloid = Cloid::new();
     let cancel = CancelIntent {
         symbol: Symbol::new("ETH"),
-        asset: 1,
         by_cloid: Some(cloid),
         by_oid: Some(OrderId(99999)), // present alongside cloid; should be ignored
     };
@@ -229,4 +251,34 @@ async fn cancel_orders_by_cloid_with_oid_present_uses_cloid_path() {
     assert_eq!(resp[0].status, "cancelled");
     assert_eq!(resp[0].cloid, cloid);
     assert!(resp[0].error.is_none());
+}
+
+#[tokio::test]
+async fn place_orders_unknown_symbol_returns_error_response_no_http() {
+    // RealHlClient::bootstrap() has an EMPTY MetaCache. Any symbol → UnknownSymbol.
+    // Verify (a) the response is an error with "unknown symbol" message,
+    // (b) no HTTP request is made (the mock server gets zero hits).
+    let signer =
+        Arc::new(Eip712AgentSigner::from_secret(SecretString::new(TEST_PK.into()), false).unwrap());
+    let server = mockito::Server::new_async().await;
+    // Note: NO `.mock("POST", "/exchange")` — if the code calls /exchange
+    // mockito will return 501 and the test will fail in a useful way.
+
+    let config = HlConfig {
+        info_url: format!("{}/info", server.url()),
+        exchange_url: format!("{}/exchange", server.url()),
+        ws_url: "ws://unused".into(),
+    };
+    let client = RealHlClient::bootstrap(config, signer);
+    let intent = make_order_intent();
+    let cloid = intent.cloid;
+    let resp = client.place_orders(&[intent]).await.unwrap();
+    assert_eq!(resp.len(), 1);
+    assert_eq!(resp[0].status, "error");
+    assert_eq!(resp[0].cloid, cloid);
+    assert!(
+        resp[0].error.as_deref().unwrap().contains("unknown symbol"),
+        "expected 'unknown symbol' in error: {:?}",
+        resp[0].error
+    );
 }

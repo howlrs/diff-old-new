@@ -98,14 +98,11 @@ pub struct CancelByCloidWire {
 }
 
 /// Convert an `OrderIntent` (executor-core domain type) into the HL wire
-/// shape `OrderWire`.
-///
-/// The caller passes `OrderIntent.asset` directly (set at intent construction
-/// time, currently 0 for algorithm-runtime callers — to be resolved via
-/// meta cache in PR-B2b).
-pub fn order_intent_to_wire(intent: &OrderIntent) -> OrderWire {
+/// shape `OrderWire`. The asset index is supplied by the caller after
+/// resolving via `MetaCache` (PR-C1).
+pub fn order_intent_to_wire(intent: &OrderIntent, asset: u32) -> OrderWire {
     OrderWire {
-        a: intent.asset,
+        a: asset,
         b: matches!(intent.side, Side::Long),
         p: format!("{}", intent.px),
         s: format!("{}", intent.sz),
@@ -120,6 +117,25 @@ pub fn order_intent_to_wire(intent: &OrderIntent) -> OrderWire {
             },
         },
         c: Some(format!("{}", intent.cloid)),
+    }
+}
+
+/// Convert a `CancelIntent` to the HL wire shape `CancelByCloidWire`.
+/// `intent.by_cloid` MUST be Some — by_oid-only cancellations are rejected
+/// at the call site in `RealHlClient::cancel_orders` before reaching here.
+#[allow(clippy::expect_used)]
+pub fn cancel_intent_to_wire(
+    intent: &executor_core::intent::CancelIntent,
+    asset: u32,
+) -> CancelByCloidWire {
+    CancelByCloidWire {
+        asset,
+        cloid: format!(
+            "{}",
+            intent
+                .by_cloid
+                .expect("cancel_intent_to_wire: by_cloid must be Some — caller MUST validate")
+        ),
     }
 }
 

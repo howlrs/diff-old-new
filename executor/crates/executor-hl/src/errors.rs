@@ -25,6 +25,9 @@ pub enum HlError {
     #[error("invalid action format: {0}")]
     ActionFormat(String),
 
+    #[error("unknown symbol (not in MetaCache): {0}")]
+    UnknownSymbol(executor_core::symbol::Symbol),
+
     #[error("hl exchange error: {code:?} {message}")]
     Exchange {
         code: Option<String>,
