@@ -178,7 +178,7 @@ async fn cancel_orders_success_string_response() {
 }
 
 #[tokio::test]
-async fn cancel_orders_by_oid_returns_action_format_error() {
+async fn cancel_orders_by_oid_only_returns_action_format_error() {
     let server = mockito::Server::new_async().await;
     // No mock needed — the error fires before any HTTP call.
     let client = make_client(&server.url());
@@ -192,10 +192,41 @@ async fn cancel_orders_by_oid_returns_action_format_error() {
     match err {
         HlError::ActionFormat(msg) => {
             assert!(
-                msg.contains("by_oid cancel not supported"),
+                msg.contains("by_oid-only cancel not supported"),
                 "msg was: {msg}"
             );
         }
         other => panic!("expected ActionFormat err, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn cancel_orders_by_cloid_with_oid_present_uses_cloid_path() {
+    // Gemini PR-B2a review fix: emergency_stop in routes.rs sets BOTH by_cloid
+    // and by_oid. Earlier impl rejected the whole batch on `by_oid.is_some()`.
+    // After fix, we silently use by_cloid and ignore by_oid for cancel-by-cloid path.
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("POST", "/exchange")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}"#,
+        )
+        .create_async()
+        .await;
+
+    let client = make_client(&server.url());
+    let cloid = Cloid::new();
+    let cancel = CancelIntent {
+        symbol: Symbol::new("ETH"),
+        asset: 1,
+        by_cloid: Some(cloid),
+        by_oid: Some(OrderId(99999)), // present alongside cloid; should be ignored
+    };
+    let resp = client.cancel_orders(&[cancel]).await.unwrap();
+    assert_eq!(resp.len(), 1);
+    assert_eq!(resp[0].status, "cancelled");
+    assert_eq!(resp[0].cloid, cloid);
+    assert!(resp[0].error.is_none());
 }

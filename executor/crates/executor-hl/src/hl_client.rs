@@ -559,22 +559,22 @@ impl HlClient for RealHlClient {
         let weight = 1 + (cancels.len() as u32 / 40);
         let _wait = self.rate_limiter.acquire(weight).await;
 
-        // by_cloid only. by_oid is explicitly rejected (PR-B2a scope).
+        // PR-B2a: cancelByCloid only. If `by_cloid` is present we use it
+        // (silently ignoring any `by_oid` to avoid breaking emergency_stop
+        // flows that opportunistically include both). If only `by_oid` is
+        // present (no cloid), we reject — by-oid path arrives in a later PR.
         let cancel_wires: Result<Vec<crate::eip712::CancelByCloidWire>, HlError> = cancels
             .iter()
-            .map(|c| {
-                if c.by_oid.is_some() {
-                    return Err(HlError::ActionFormat(
-                        "by_oid cancel not supported in PR-B2a; use by_cloid".into(),
-                    ));
-                }
-                let cloid = c.by_cloid.ok_or_else(|| {
-                    HlError::ActionFormat("CancelIntent missing both by_cloid and by_oid".into())
-                })?;
-                Ok(crate::eip712::CancelByCloidWire {
+            .map(|c| match c.by_cloid {
+                Some(cloid) => Ok(crate::eip712::CancelByCloidWire {
                     asset: c.asset,
                     cloid: format!("{}", cloid),
-                })
+                }),
+                None => Err(HlError::ActionFormat(
+                    "by_oid-only cancel not supported in PR-B2a; CancelIntent must \
+                     include by_cloid (PR-B2b will add by_oid path)"
+                        .into(),
+                )),
             })
             .collect();
         let cancel_wires = cancel_wires?;
@@ -612,6 +612,17 @@ impl HlClient for RealHlClient {
 /// - `{"filled": {"oid": <u64>, "totalSz": "...", "avgPx": "..."}}` -> status="filled"
 /// - `{"error": "<msg>"}` -> status="error"
 ///
+/// Render a `serde_json::Value` as a human-readable error string.
+/// Strings are emitted verbatim; objects/arrays are rendered as compact JSON
+/// so the diagnostic detail is preserved instead of being collapsed to "(no msg)".
+fn json_to_err_string(v: &serde_json::Value) -> String {
+    if let Some(s) = v.as_str() {
+        s.to_string()
+    } else {
+        v.to_string()
+    }
+}
+
 /// Top-level `{"status":"err", "response": "<msg>"}` returns `Err(HlError::Exchange)`.
 fn parse_exchange_response(
     text: &str,
@@ -623,11 +634,11 @@ fn parse_exchange_response(
     if v.get("status").and_then(|s| s.as_str()) == Some("err") {
         let msg = v
             .get("response")
-            .and_then(|r| r.as_str())
-            .unwrap_or("(no msg)");
+            .map(json_to_err_string)
+            .unwrap_or_else(|| "(no msg)".into());
         return Err(HlError::Exchange {
             code: Some("top_level_err".into()),
-            message: msg.into(),
+            message: msg,
         });
     }
 
@@ -670,12 +681,11 @@ fn parse_exchange_response(
                 error: None,
             });
         } else if let Some(err) = status.get("error") {
-            let msg = err.as_str().unwrap_or("(no msg)");
             out.push(OrderResponse {
                 cloid,
                 oid: None,
                 status: "error".into(),
-                error: Some(msg.into()),
+                error: Some(json_to_err_string(err)),
             });
         } else {
             out.push(OrderResponse {
@@ -703,11 +713,11 @@ fn parse_cancel_response(
     if v.get("status").and_then(|s| s.as_str()) == Some("err") {
         let msg = v
             .get("response")
-            .and_then(|r| r.as_str())
-            .unwrap_or("(no msg)");
+            .map(json_to_err_string)
+            .unwrap_or_else(|| "(no msg)".into());
         return Err(HlError::Exchange {
             code: Some("top_level_err".into()),
-            message: msg.into(),
+            message: msg,
         });
     }
 
@@ -739,7 +749,7 @@ fn parse_cancel_response(
                 cloid,
                 oid: None,
                 status: "error".into(),
-                error: Some(err.as_str().unwrap_or("(no msg)").into()),
+                error: Some(json_to_err_string(err)),
             });
         } else {
             out.push(OrderResponse {
