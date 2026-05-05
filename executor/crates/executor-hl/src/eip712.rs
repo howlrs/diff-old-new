@@ -97,6 +97,31 @@ pub struct CancelByCloidWire {
     pub cloid: String,
 }
 
+/// PR-D7: HL python-sdk `float_to_wire` reference behavior.
+///
+/// Mainnet observation 2026-05-05: HL rejected an ALO place with the WS
+/// status `badAloPxRejected` because we serialised the price as `"2387.0"`
+/// while HL's reference normalizes to `"2387"` (trailing-zero stripped).
+/// The python-sdk `float_to_wire` does:
+///
+/// ```python
+/// rounded = f"{x:.8f}"            # cap to 8 fractional digits
+/// normalized = Decimal(rounded).normalize()
+/// return f"{normalized:f}"        # fixed-point, no scientific notation
+/// ```
+///
+/// `rust_decimal::Decimal::normalize` already produces the same result for
+/// the inputs that flow through here (book grid prices have ≤ 6 fractional
+/// digits, well under the 8-digit cap), so we don't need the explicit
+/// `:.8f` round trip — `Decimal::normalize` plus the default `Display`
+/// (fixed-point, no scientific notation) suffices.
+///
+/// This is the only place that should turn a `Decimal` into HL wire form
+/// for a place. Cancel paths use cloid/asset so they're unaffected.
+fn decimal_to_hl_wire(d: rust_decimal::Decimal) -> String {
+    format!("{}", d.normalize())
+}
+
 /// Convert an `OrderIntent` (executor-core domain type) into the HL wire
 /// shape `OrderWire`. The asset index is supplied by the caller after
 /// resolving via `MetaCache` (PR-C1).
@@ -104,8 +129,8 @@ pub fn order_intent_to_wire(intent: &OrderIntent, asset: u32) -> OrderWire {
     OrderWire {
         a: asset,
         b: matches!(intent.side, Side::Long),
-        p: format!("{}", intent.px),
-        s: format!("{}", intent.sz),
+        p: decimal_to_hl_wire(intent.px),
+        s: decimal_to_hl_wire(intent.sz),
         r: intent.reduce_only,
         t: OrderTypeWire {
             limit: LimitTif {
@@ -293,5 +318,50 @@ mod tests {
             "expected fix-map(2), got 0x{:02x}",
             bytes[0]
         );
+    }
+
+    /// PR-D7: HL python-sdk's `float_to_wire` strips trailing zeros via
+    /// `Decimal(...).normalize()`. `format!("{}", Decimal::from_str("2387.0"))`
+    /// preserves the trailing zero, so HL would receive `"2387.0"` and reject
+    /// the place with `badAloPxRejected` on grid prices that happen to have
+    /// trailing zeros. `decimal_to_hl_wire` MUST strip them to match.
+    #[test]
+    fn decimal_to_hl_wire_strips_trailing_zeros() {
+        use rust_decimal_macros::dec;
+        // Cases observed live: book grid touched these values.
+        assert_eq!(decimal_to_hl_wire(dec!(2387.0)), "2387");
+        assert_eq!(decimal_to_hl_wire(dec!(2387.00)), "2387");
+        assert_eq!(decimal_to_hl_wire(dec!(2387.10)), "2387.1");
+        // Non-zero last digit must be preserved untouched.
+        assert_eq!(decimal_to_hl_wire(dec!(2387.9)), "2387.9");
+        assert_eq!(decimal_to_hl_wire(dec!(0.005)), "0.005");
+        assert_eq!(decimal_to_hl_wire(dec!(0.0050)), "0.005");
+        // Whole numbers untouched.
+        assert_eq!(decimal_to_hl_wire(dec!(2400)), "2400");
+    }
+
+    /// `order_intent_to_wire` must apply the normalisation end-to-end.
+    /// Pre-PR-D7 this returned `p:"2387.0"`; post-fix it must be `p:"2387"`.
+    #[test]
+    fn order_intent_to_wire_normalises_price_and_size() {
+        use executor_core::cloid::Cloid;
+        use executor_core::symbol::Symbol;
+        use rust_decimal_macros::dec;
+        let intent = OrderIntent {
+            cloid: Cloid::new(),
+            symbol: Symbol::new("ETH"),
+            side: Side::Long,
+            px: dec!(2387.0),
+            sz: dec!(0.0050),
+            tif: Tif::Alo,
+            reduce_only: false,
+        };
+        let wire = order_intent_to_wire(&intent, 4 /* arbitrary asset */);
+        assert_eq!(
+            wire.p, "2387",
+            "trailing zero must be stripped (HL ALO grid match)"
+        );
+        assert_eq!(wire.s, "0.005", "trailing zero must be stripped");
+        assert_eq!(wire.t.limit.tif, "Alo");
     }
 }
