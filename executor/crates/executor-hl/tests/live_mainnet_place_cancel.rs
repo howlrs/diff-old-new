@@ -62,17 +62,23 @@ fn agent_pk_secret() -> SecretString {
     SecretString::new(s.into())
 }
 
-fn make_client() -> RealHlClient {
+async fn make_client() -> RealHlClient {
     let signer = Arc::new(
         Eip712AgentSigner::from_secret(agent_pk_secret(), true /* is_mainnet */)
             .expect("Eip712AgentSigner::from_secret failed; HL_AGENT_PK malformed?"),
     );
-    RealHlClient::new(HlConfig::mainnet(), signer)
+    let bootstrap = RealHlClient::bootstrap(HlConfig::mainnet(), signer);
+    let meta = std::sync::Arc::new(
+        executor_hl::meta::MetaCache::build(&bootstrap, &[None])
+            .await
+            .expect("MetaCache::build failed at PR-B2b live test setup"),
+    );
+    bootstrap.with_meta(meta)
 }
 
 #[tokio::test]
 async fn live_mainnet_place_cancel_eth_round_trip() {
-    let client = make_client();
+    let client = make_client().await;
     let master = master_address();
 
     // === pre-snapshot ===
@@ -96,14 +102,16 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
         pre_xyz_orders.len()
     );
 
-    // === ETH index resolve via fetch_meta (PR-A path) ===
+    // === ETH index resolve via fetch_meta (diagnostic only post-PR-C1) ===
     let meta = client.fetch_meta(None).await.expect("fetch meta");
-    let eth_idx = meta
+    let _eth_idx = meta
         .universe
         .iter()
         .position(|u| u.name == "ETH")
         .expect("ETH not in default perp universe") as u32;
-    eprintln!("ETH asset index: {}", eth_idx);
+    eprintln!(
+        "ETH found in meta (asset index assigned via MetaCache inside RealHlClient post-PR-C1)"
+    );
 
     // === best price + tick-based offset ===
     //
@@ -177,7 +185,6 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
     let intent = OrderIntent {
         cloid,
         symbol: Symbol::new("ETH"),
-        asset: eth_idx,
         side: Side::Long,
         px: order_px,
         sz: order_sz,
@@ -223,7 +230,6 @@ async fn live_mainnet_place_cancel_eth_round_trip() {
     // === cancel by cloid ===
     let cancel = CancelIntent {
         symbol: Symbol::new("ETH"),
-        asset: eth_idx,
         by_cloid: Some(cloid),
         by_oid: None,
     };
