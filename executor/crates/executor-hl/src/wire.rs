@@ -202,3 +202,40 @@ impl WireL2Book {
         }
     }
 }
+
+/// HL `meta` response (perp universe).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WireMeta {
+    pub universe: Vec<WireUniverseEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireUniverseEntry {
+    pub name: String,
+    pub sz_decimals: u32,
+    pub max_leverage: u32,
+    #[serde(default)]
+    pub only_isolated: bool,
+}
+
+/// HL `userRole` response.
+///
+/// Wire shapes (from real responses):
+/// - `{"role":"user"}`
+/// - `{"role":"agent","data":{"user":"0x..."}}`
+/// - `{"role":"vault"}` / `"subAccount"` / `"missing"` (data optional)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "role", rename_all = "camelCase")]
+pub enum WireUserRole {
+    User,
+    Agent { data: WireAgentData },
+    Vault,
+    SubAccount,
+    Missing,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WireAgentData {
+    pub user: String,
+}
