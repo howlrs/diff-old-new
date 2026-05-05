@@ -225,9 +225,25 @@ pub struct WireUniverseEntry {
 /// - `{"role":"user"}`
 /// - `{"role":"agent","data":{"user":"0x..."}}`
 /// - `{"role":"vault"}` / `"subAccount"` / `"missing"` (data optional)
+///
+/// Forward compatibility: untagged enum with an `Unknown(Value)` fallback so a
+/// future role HL adds (e.g. `marketMaker`, `vip`) does NOT crash the client.
+/// `#[serde(other)]` is not usable here because it requires externally-tagged
+/// representation, but internally-tagged is required for the `data` field of
+/// the `agent` variant. Using `untagged` with a catch-all `Unknown` is the
+/// idiomatic alternative.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum WireUserRole {
+    Tagged(WireUserRoleTagged),
+    /// Captured as raw JSON when the `role` value is one we don't know yet.
+    Unknown(serde_json::Value),
+}
+
+/// Inner enum holding the known variants. `WireUserRole::Tagged(...)` wraps this.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
-pub enum WireUserRole {
+pub enum WireUserRoleTagged {
     User,
     Agent { data: WireAgentData },
     Vault,

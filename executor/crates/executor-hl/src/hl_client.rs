@@ -172,17 +172,27 @@ pub enum Role {
     Missing,
 }
 
+/// Catch-all for HL roles we don't know yet (forward compatibility).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnknownRole(pub String);
+
 impl Role {
     pub fn from_wire(w: &crate::wire::WireUserRole) -> Self {
-        use crate::wire::WireUserRole as W;
+        use crate::wire::{WireUserRole as W, WireUserRoleTagged as T};
         match w {
-            W::User => Role::User,
-            W::Agent { data } => Role::Agent {
-                master: Address::new(&data.user),
+            W::Tagged(t) => match t {
+                T::User => Role::User,
+                T::Agent { data } => Role::Agent {
+                    master: Address::new(&data.user),
+                },
+                T::Vault => Role::Vault,
+                T::SubAccount => Role::SubAccount,
+                T::Missing => Role::Missing,
             },
-            W::Vault => Role::Vault,
-            W::SubAccount => Role::SubAccount,
-            W::Missing => Role::Missing,
+            // Unknown JSON value (e.g. `{"role":"marketMaker"}`) — preserve it
+            // as Missing so callers don't crash but behavior matches the
+            // safest known variant.
+            W::Unknown(_) => Role::Missing,
         }
     }
 }
@@ -383,7 +393,9 @@ impl RealHlClient {
     }
 
     /// POST a JSON body to the /info endpoint and return the response body as a String.
-    /// Maps non-2xx into `HlError::Network`.
+    /// Maps non-2xx into `HlError::Network` with the response body included so
+    /// HL's JSON error detail (e.g. "Unknown dex", rate-limit reason) is
+    /// preserved for diagnosis.
     async fn post_info(&self, body: &serde_json::Value) -> Result<String, HlError> {
         let resp = self
             .http
@@ -392,12 +404,15 @@ impl RealHlClient {
             .send()
             .await
             .map_err(|e| HlError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(HlError::Network(format!("HTTP {}", resp.status())));
-        }
-        resp.text()
+        let status = resp.status();
+        let text = resp
+            .text()
             .await
-            .map_err(|e| HlError::Network(e.to_string()))
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        if !status.is_success() {
+            return Err(HlError::Network(format!("HTTP {status}: {text}")));
+        }
+        Ok(text)
     }
 }
 

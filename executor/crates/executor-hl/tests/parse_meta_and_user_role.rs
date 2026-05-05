@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use executor_hl::wire::{WireMeta, WireUserRole};
+use executor_hl::wire::{WireMeta, WireUserRole, WireUserRoleTagged};
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> String {
@@ -37,8 +37,8 @@ fn parses_user_role_user() {
     let json = fixture("user_role_user.json");
     let r: WireUserRole = serde_json::from_str(&json).expect("parse role user");
     match r {
-        WireUserRole::User => {}
-        other => panic!("expected User, got {other:?}"),
+        WireUserRole::Tagged(WireUserRoleTagged::User) => {}
+        other => panic!("expected Tagged(User), got {other:?}"),
     }
 }
 
@@ -47,9 +47,17 @@ fn parses_user_role_agent() {
     let json = fixture("user_role_agent.json");
     let r: WireUserRole = serde_json::from_str(&json).expect("parse role agent");
     match r {
-        WireUserRole::Agent { data } => {
+        WireUserRole::Tagged(WireUserRoleTagged::Agent { data }) => {
             assert!(data.user.starts_with("0x"));
         }
-        other => panic!("expected Agent, got {other:?}"),
+        other => panic!("expected Tagged(Agent), got {other:?}"),
     }
+}
+
+#[test]
+fn parses_unknown_role_does_not_panic() {
+    // Forward compatibility: a future HL role must NOT crash the client.
+    let json = r#"{"role":"marketMaker","data":{"foo":"bar"}}"#;
+    let r: WireUserRole = serde_json::from_str(json).expect("parse unknown role");
+    assert!(matches!(r, WireUserRole::Unknown(_)));
 }

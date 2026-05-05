@@ -27,7 +27,7 @@ def _scrub_address(value):
     return value
 
 
-def _walk(obj, oid_counter):
+def _walk(obj, oid_counter, cloid_counter):
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
@@ -36,13 +36,18 @@ def _walk(obj, oid_counter):
             elif k == "oid" and isinstance(v, int):
                 out[k] = oid_counter[0]
                 oid_counter[0] += 1
+            elif k == "cloid" and isinstance(v, str):
+                # cloid is a 16-byte hex (32-char) chosen by the user. May leak
+                # strategy/persona signal; replace with a sequential dummy.
+                out[k] = f"0x{cloid_counter[0]:032x}"
+                cloid_counter[0] += 1
             elif k == "data" and isinstance(v, dict) and "user" in v:
                 out[k] = {**v, "user": _scrub_address(v["user"])}
             else:
-                out[k] = _walk(v, oid_counter)
+                out[k] = _walk(v, oid_counter, cloid_counter)
         return out
     if isinstance(obj, list):
-        return [_walk(x, oid_counter) for x in obj]
+        return [_walk(x, oid_counter, cloid_counter) for x in obj]
     return obj
 
 
@@ -55,7 +60,8 @@ def main():
     kind = sys.argv[3]
     raw = json.loads(in_path.read_text())
     oid_counter = [1]
-    sanitized = _walk(raw, oid_counter)
+    cloid_counter = [1]
+    sanitized = _walk(raw, oid_counter, cloid_counter)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(sanitized, indent=2, ensure_ascii=False) + "\n")
     print(f"OK: {in_path} -> {out_path} (kind={kind})")
