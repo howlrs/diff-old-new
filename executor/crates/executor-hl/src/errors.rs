@@ -19,6 +19,12 @@ pub enum HlError {
     #[error("invalid response: {0}")]
     InvalidResponse(String),
 
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
+
+    #[error("invalid action format: {0}")]
+    ActionFormat(String),
+
     #[error("hl exchange error: {code:?} {message}")]
     Exchange {
         code: Option<String>,

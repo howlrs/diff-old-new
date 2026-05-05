@@ -42,6 +42,11 @@ secrecy = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 
+# PR-B1: EIP-712 signer
+alloy = { workspace = true }
+rmp-serde = { workspace = true }
+hex = { workspace = true }
+
 [dev-dependencies]
 mockall = { workspace = true }
 proptest = { workspace = true }

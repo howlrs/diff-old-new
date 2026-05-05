@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod batch_sender;
+pub mod eip712;
 pub mod errors;
 pub mod hl_client;
 pub mod rate_limiter;
@@ -28,5 +29,5 @@ pub use hl_client::{
     RealHlClient, Role,
 };
 pub use rate_limiter::TokenBucket;
-pub use signer::{MockSigner, Signature, Signer};
+pub use signer::{Eip712AgentSigner, MockSigner, Signature, Signer};
 pub use ws_state::WsStateManager;
