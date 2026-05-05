@@ -125,19 +125,98 @@ pub struct OrderResponse {
     pub error: Option<String>,
 }
 
+/// Domain-level open order (one HL `openOrders` entry mapped to local types).
+///
+/// We keep the wire `oid` and translate side into `executor_core::types::Side`
+/// for callers; cloid is unknown from `openOrders` alone (HL does not echo it
+/// in this endpoint), so it stays None until matched with local registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HlOpenOrder {
+    pub symbol: Symbol,
+    pub side: executor_core::types::Side,
+    pub limit_px: Decimal,
+    pub sz: Decimal,
+    pub oid: OrderId,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl HlOpenOrder {
+    pub fn from_wire(w: &crate::wire::WireOpenOrder) -> Self {
+        use crate::wire::WireOrderSide;
+        let side = match w.side {
+            WireOrderSide::A => executor_core::types::Side::Short, // ask = sell
+            WireOrderSide::B => executor_core::types::Side::Long,  // bid = buy
+        };
+        let ts = chrono::Utc
+            .timestamp_millis_opt(w.timestamp)
+            .single()
+            .unwrap_or_else(Utc::now);
+        Self {
+            symbol: Symbol::new(&w.coin),
+            side,
+            limit_px: w.limit_px,
+            sz: w.sz,
+            oid: OrderId(w.oid),
+            timestamp: ts,
+        }
+    }
+}
+
+/// HL `userRole` mapped to a Rust enum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    User,
+    Agent { master: Address },
+    Vault,
+    SubAccount,
+    Missing,
+}
+
+impl Role {
+    pub fn from_wire(w: &crate::wire::WireUserRole) -> Self {
+        use crate::wire::WireUserRole as W;
+        match w {
+            W::User => Role::User,
+            W::Agent { data } => Role::Agent {
+                master: Address::new(&data.user),
+            },
+            W::Vault => Role::Vault,
+            W::SubAccount => Role::SubAccount,
+            W::Missing => Role::Missing,
+        }
+    }
+}
+
 #[async_trait]
 pub trait HlClient: Send + Sync {
-    /// Fetch full account state (positions, open orders, margin).
-    async fn fetch_account_state(&self, address: &Address)
-        -> Result<AccountStateSnapshot, HlError>;
+    /// Fetch full account state. `dex=None` selects the default perp dex;
+    /// `dex=Some("xyz")` etc. selects a HIP-3 builder dex.
+    async fn fetch_account_state(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<AccountStateSnapshot, HlError>;
 
-    /// Fetch a fresh top-N book snapshot (for state init / reconciliation).
+    /// Fetch a fresh top-N book snapshot.
     async fn fetch_book_snapshot(&self, symbol: &Symbol) -> Result<OrderBook, HlError>;
 
-    /// Place a batch of orders. Returns per-cloid response.
+    /// Fetch all open orders for the address (default dex unless specified).
+    async fn fetch_open_orders(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError>;
+
+    /// Fetch the perp universe metadata (symbol list + leverage caps).
+    async fn fetch_meta(&self, dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError>;
+
+    /// Identify the role of an address (catches agent/master mix-ups).
+    async fn fetch_user_role(&self, address: &Address) -> Result<Role, HlError>;
+
+    /// Place a batch of orders.
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError>;
 
-    /// Cancel a batch of orders by cloid (preferred) or oid.
+    /// Cancel a batch of orders.
     async fn cancel_orders(&self, cancels: &[CancelIntent]) -> Result<Vec<OrderResponse>, HlError>;
 }
 
@@ -197,6 +276,7 @@ impl HlClient for MockHlClient {
     async fn fetch_account_state(
         &self,
         address: &Address,
+        _dex: Option<&str>,
     ) -> Result<AccountStateSnapshot, HlError> {
         let snap = self
             .account
@@ -215,6 +295,24 @@ impl HlClient for MockHlClient {
             .get(symbol)
             .cloned()
             .ok_or_else(|| HlError::InvalidResponse(format!("no seeded book for {symbol}")))
+    }
+
+    async fn fetch_open_orders(
+        &self,
+        _address: &Address,
+        _dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch_meta(&self, _dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError> {
+        Ok(crate::wire::WireMeta {
+            universe: Vec::new(),
+        })
+    }
+
+    async fn fetch_user_role(&self, _address: &Address) -> Result<Role, HlError> {
+        Ok(Role::User)
     }
 
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError> {
@@ -283,6 +381,22 @@ impl RealHlClient {
             http,
         }
     }
+
+    /// POST a JSON body to the /info endpoint and return the response body as a String.
+    /// Maps non-2xx into `HlError::Network`.
+    async fn post_info(&self, body: &serde_json::Value) -> Result<String, HlError> {
+        let resp = self
+            .http
+            .post(&self.config.info_url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| HlError::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(HlError::Network(format!("HTTP {}", resp.status())));
+        }
+        resp.text().await.map_err(|e| HlError::Network(e.to_string()))
+    }
 }
 
 #[async_trait]
@@ -290,49 +404,73 @@ impl HlClient for RealHlClient {
     async fn fetch_account_state(
         &self,
         address: &Address,
+        dex: Option<&str>,
     ) -> Result<AccountStateSnapshot, HlError> {
         let _wait = self.rate_limiter.acquire(2).await;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "type": "clearinghouseState",
             "user": address.as_str(),
         });
-        let resp = self
-            .http
-            .post(&self.config.info_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HlError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(HlError::Network(format!("HTTP {}", resp.status())));
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
         }
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| HlError::Network(e.to_string()))?;
-        let wire: crate::wire::WireClearinghouseState = serde_json::from_str(&text)
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireClearinghouseState = serde_json::from_str(&resp)
             .map_err(|e| HlError::InvalidResponse(format!("clearinghouseState: {e}")))?;
         Ok(AccountStateSnapshot::from_wire(address.clone(), &wire))
     }
 
     async fn fetch_book_snapshot(&self, symbol: &Symbol) -> Result<OrderBook, HlError> {
-        let _wait = self.rate_limiter.acquire(1).await;
+        let _wait = self.rate_limiter.acquire(2).await;
         let body = serde_json::json!({
             "type": "l2Book",
             "coin": symbol.as_str(),
         });
-        let resp = self
-            .http
-            .post(&self.config.info_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HlError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(HlError::Network(format!("HTTP {}", resp.status())));
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireL2Book = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("l2Book: {e}")))?;
+        Ok(wire.to_orderbook())
+    }
+
+    async fn fetch_open_orders(
+        &self,
+        address: &Address,
+        dex: Option<&str>,
+    ) -> Result<Vec<HlOpenOrder>, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let mut body = serde_json::json!({
+            "type": "openOrders",
+            "user": address.as_str(),
+        });
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
         }
-        // 80% プロト: 空 book を返す. 実装は次 PR で詳細化.
-        Ok(OrderBook::default())
+        let resp = self.post_info(&body).await?;
+        let wire: Vec<crate::wire::WireOpenOrder> = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("openOrders: {e}")))?;
+        Ok(wire.iter().map(HlOpenOrder::from_wire).collect())
+    }
+
+    async fn fetch_meta(&self, dex: Option<&str>) -> Result<crate::wire::WireMeta, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let mut body = serde_json::json!({"type": "meta"});
+        if let Some(d) = dex {
+            body["dex"] = serde_json::Value::String(d.to_string());
+        }
+        let resp = self.post_info(&body).await?;
+        serde_json::from_str(&resp).map_err(|e| HlError::InvalidResponse(format!("meta: {e}")))
+    }
+
+    async fn fetch_user_role(&self, address: &Address) -> Result<Role, HlError> {
+        let _wait = self.rate_limiter.acquire(20).await;
+        let body = serde_json::json!({
+            "type": "userRole",
+            "user": address.as_str(),
+        });
+        let resp = self.post_info(&body).await?;
+        let wire: crate::wire::WireUserRole = serde_json::from_str(&resp)
+            .map_err(|e| HlError::InvalidResponse(format!("userRole: {e}")))?;
+        Ok(Role::from_wire(&wire))
     }
 
     async fn place_orders(&self, orders: &[OrderIntent]) -> Result<Vec<OrderResponse>, HlError> {

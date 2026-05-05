@@ -24,7 +24,8 @@ pub mod ws_state;
 pub use batch_sender::{BatchSender, BatchSenderConfig, OrderOrCancel};
 pub use errors::HlError;
 pub use hl_client::{
-    AccountStateSnapshot, HlClient, HlConfig, MockHlClient, OrderResponse, RealHlClient,
+    AccountStateSnapshot, HlClient, HlConfig, HlOpenOrder, MockHlClient, OrderResponse,
+    RealHlClient, Role,
 };
 pub use rate_limiter::TokenBucket;
 pub use signer::{MockSigner, Signature, Signer};
