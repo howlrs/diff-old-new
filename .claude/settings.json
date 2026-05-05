@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/o9oem/workspace/crypto/diff-old-new/.claude/hooks/deny-pk-access.sh",
+            "timeout": 3
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/o9oem/workspace/crypto/diff-old-new/.claude/hooks/deny-pk-read.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}
