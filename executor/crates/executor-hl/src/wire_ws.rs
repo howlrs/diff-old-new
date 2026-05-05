@@ -167,8 +167,18 @@ pub struct WireWsOrderState {
     pub cloid: Option<Cloid>,
 }
 
-/// Map HL's free-form status string into our typed enum. Unknown statuses
-/// become `Open` (safe default — caller treats it as "still alive").
+/// Map HL's free-form status string into our typed enum.
+///
+/// PR-D5 (2026-05-05): unknown statuses now default to `Rejected`, not `Open`.
+/// Treating an unknown status as Open caused PR-D3's in-flight cap to flip
+/// `seen_open=true` for an order HL had actually rejected — the cap then
+/// dropped the entry on the next tick (`seen_open=true` and gone from
+/// open_orders) and the algorithm kept stacking new ALOs. Defaulting to
+/// Rejected lets the cap absorb genuinely-broken orders so the algo halts
+/// instead of looping. Known terminal/active statuses below are exhaustive
+/// per HL docs as of 2026-05; any newly added status will be conservatively
+/// treated as Rejected and surfaced via the warn log so we can promote it
+/// to the right branch in a follow-up.
 fn status_from_wire(s: &str) -> WsOrderStatus {
     match s {
         // HL standard
@@ -182,16 +192,24 @@ fn status_from_wire(s: &str) -> WsOrderStatus {
         | "scheduledCancel"
         | "selfTradeCanceled"
         | "siblingFilledCanceled"
-        | "tickRejected" => {
+        | "tickRejected"
+        // ALO-specific rejections (post-only cross / off-grid price etc.).
+        // Observed live on mainnet 2026-05-05 (cloid 0x019df87f7401...) where
+        // HL replied with `badAloPxRejected` and our previous default-to-Open
+        // defeated PR-D3 in-flight cap. Names harvested from the HL docs.
+        | "badAloPxRejected"
+        | "postOnlyCanceled"
+        | "iocCanceled"
+        | "selfTradePrevented" => {
             // All of these terminate the order similarly to "rejected".
             WsOrderStatus::Rejected
         }
         _ => {
             tracing::warn!(
                 status = s,
-                "ws_wire: unknown order status, treating as open"
+                "ws_wire: unknown order status, treating as Rejected (fail-safe)"
             );
-            WsOrderStatus::Open
+            WsOrderStatus::Rejected
         }
     }
 }
@@ -515,5 +533,37 @@ mod tests {
         let (_, bids, asks) = assert_l2(msgs);
         assert!(bids.is_empty());
         assert!(asks.is_empty());
+    }
+
+    /// PR-D5 regression: HL's ALO post-only rejections (observed live on
+    /// 2026-05-05) must map to `Rejected`, not `Open`. Pre-fix, defaulting
+    /// unknown to Open let the in-flight cap flip seen_open=true and then
+    /// drop the entry on the next tick (open_orders no longer contained it),
+    /// re-enabling repost stacking.
+    #[test]
+    fn status_from_wire_alo_rejections_map_to_rejected() {
+        for s in [
+            "badAloPxRejected",
+            "postOnlyCanceled",
+            "iocCanceled",
+            "selfTradePrevented",
+        ] {
+            assert_eq!(
+                status_from_wire(s),
+                WsOrderStatus::Rejected,
+                "{s} must be Rejected",
+            );
+        }
+    }
+
+    /// Forward-compat fail-safe: an HL-side string we have not seen yet
+    /// must NOT be treated as Open (would break PR-D3 cap). Default is now
+    /// Rejected so the algorithm halts conservatively.
+    #[test]
+    fn status_from_wire_unknown_defaults_to_rejected() {
+        assert_eq!(
+            status_from_wire("totallyMadeUpStatus_2099"),
+            WsOrderStatus::Rejected,
+        );
     }
 }

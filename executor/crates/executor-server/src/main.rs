@@ -368,12 +368,23 @@ async fn main() -> anyhow::Result<()> {
                 args.baseline_szi_epsilon
             )
         })?;
+        // PR-D6: hand the safety-gate allow-list to BaselineGuard so symbols
+        // the algorithm is explicitly authorised to trade (e.g. ETH) are
+        // exempt from baseline drift checks. Symbols outside the allow-list
+        // (HYPE / TON / xyz:META / ...) remain strictly guarded — operator
+        // hasn't authorised the bot to touch them. Wildcard `*` resolves to
+        // `allow_symbols=None` in SafetyGate; in that mode we keep the old
+        // "guard everything" behavior, since the operator hasn't named a
+        // specific symbol they want exempt.
+        let excluded_symbols: std::collections::HashSet<executor_core::symbol::Symbol> =
+            state.safety.allow_symbols.clone().unwrap_or_default();
         let guard = BaselineGuard::capture(
             state.hl_client.as_ref(),
             Address::new(master),
             dexes,
             Duration::from_secs(args.baseline_poll_secs),
             szi_epsilon,
+            excluded_symbols,
         )
         .await
         .context("BaselineGuard::capture failed")?;
@@ -381,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
             master = master,
             dexes = ?guard.dexes,
             baseline_size = guard.baseline.len(),
+            excluded_size = guard.excluded_symbols.len(),
             poll_secs = guard.poll_interval.as_secs(),
             szi_epsilon = ?guard.szi_epsilon,
             "BaselineGuard captured",

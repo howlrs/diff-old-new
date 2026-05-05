@@ -41,6 +41,16 @@ pub struct BaselineGuard {
     pub dexes: Vec<Option<String>>,
     pub poll_interval: Duration,
     pub szi_epsilon: Decimal,
+    /// PR-D6: symbols the algorithm is explicitly allowed to trade. Their
+    /// position is expected to drift, so they are NOT captured into the
+    /// baseline AND NOT compared in `check_once`. This is the only sane
+    /// behavior for the "passive_follow build" use case observed live on
+    /// 2026-05-05 (PR-D1 POSTMORTEM §6.2): the user grants the executor a
+    /// budget on ETH via `--mainnet-allow-symbols ETH`, so the guard must
+    /// stop treating ETH drift as a violation. Symbols outside this set
+    /// (e.g. HYPE / TON / xyz:META in the live test) are still strictly
+    /// guarded because the operator hasn't authorised the bot to touch them.
+    pub excluded_symbols: HashSet<Symbol>,
 }
 
 #[derive(Debug, Clone, Error)]
@@ -63,6 +73,7 @@ impl BaselineGuard {
         dexes: Vec<Option<String>>,
         poll_interval: Duration,
         szi_epsilon: Decimal,
+        excluded_symbols: HashSet<Symbol>,
     ) -> anyhow::Result<Self>
     where
         C: HlClient + ?Sized,
@@ -76,6 +87,17 @@ impl BaselineGuard {
                     format!("BaselineGuard::capture: fetch_account_state failed for dex={dex:?}")
                 })?;
             for (sym, pos) in &snap.positions {
+                if excluded_symbols.contains(sym) {
+                    // PR-D6: skip allow-listed trading symbols entirely. We
+                    // never put them in the baseline so check_once won't
+                    // produce a violation when their size moves.
+                    tracing::info!(
+                        symbol = %sym,
+                        baseline_skip = "allowlist",
+                        "BaselineGuard::capture: skipping allow-listed symbol"
+                    );
+                    continue;
+                }
                 baseline.insert((dex.clone(), sym.clone()), pos.size);
             }
         }
@@ -85,6 +107,7 @@ impl BaselineGuard {
             dexes,
             poll_interval,
             szi_epsilon,
+            excluded_symbols,
         })
     }
 
@@ -99,6 +122,10 @@ impl BaselineGuard {
                 .fetch_account_state(&self.master, dex.as_deref())
                 .await?;
             for (sym, pos) in &snap.positions {
+                if self.excluded_symbols.contains(sym) {
+                    // PR-D6: ignore drift on allow-listed symbols.
+                    continue;
+                }
                 let key: BaselineKey = (dex.clone(), sym.clone());
                 seen.insert(key.clone());
                 let baseline_szi = self.baseline.get(&key).copied().unwrap_or(Decimal::ZERO);
@@ -167,6 +194,7 @@ mod tests {
             vec![None],
             Duration::from_secs(60),
             Decimal::ZERO,
+            HashSet::new(),
         )
         .await
         .unwrap();
@@ -192,6 +220,7 @@ mod tests {
             vec![None],
             Duration::from_secs(60),
             Decimal::ZERO,
+            HashSet::new(),
         )
         .await
         .unwrap();
@@ -213,6 +242,7 @@ mod tests {
             vec![None],
             Duration::from_secs(60),
             Decimal::ZERO,
+            HashSet::new(),
         )
         .await
         .unwrap();
@@ -237,6 +267,7 @@ mod tests {
             vec![None],
             Duration::from_secs(60),
             Decimal::ZERO,
+            HashSet::new(),
         )
         .await
         .unwrap();
@@ -260,6 +291,7 @@ mod tests {
             vec![None],
             Duration::from_secs(60),
             dec!(0.01),
+            HashSet::new(),
         )
         .await
         .unwrap();
@@ -280,6 +312,7 @@ mod tests {
             vec![None],
             Duration::from_secs(60),
             Decimal::ZERO,
+            HashSet::new(),
         )
         .await
         .unwrap();
@@ -290,6 +323,72 @@ mod tests {
             .expect_err("forced fetch failure must propagate");
         let msg = format!("{err}");
         assert!(msg.contains("forced failure"), "unexpected error: {msg}");
+    }
+
+    /// PR-D6: capture must skip excluded symbols entirely so subsequent
+    /// drift on those symbols never produces a violation. Live observation
+    /// 2026-05-05: with `--mainnet-allow-symbols ETH`, a +0.005 ETH place
+    /// (round 1 of build) tripped BaselineGuard because ETH was captured
+    /// as 0.1 → drifted to 0.105 → diff > 0.
+    #[tokio::test]
+    async fn capture_skips_excluded_symbols() {
+        let mock = MockHlClient::new();
+        let master = Address::new("0xfeedface");
+        mock.seed_account(snap_with(
+            &master,
+            &[("ETH", dec!(0.1)), ("HYPE", dec!(10))],
+        ));
+        let mut excluded = HashSet::new();
+        excluded.insert(Symbol::new("ETH"));
+        let g = BaselineGuard::capture(
+            &mock,
+            master.clone(),
+            vec![None],
+            Duration::from_secs(60),
+            Decimal::ZERO,
+            excluded,
+        )
+        .await
+        .unwrap();
+        // ETH excluded → not in baseline. HYPE captured.
+        assert!(!g.baseline.contains_key(&(None, Symbol::new("ETH"))));
+        assert_eq!(
+            g.baseline.get(&(None, Symbol::new("HYPE"))).copied(),
+            Some(dec!(10))
+        );
+    }
+
+    /// PR-D6: drift on an excluded symbol produces no violation, even when
+    /// drift on a non-excluded symbol still does.
+    #[tokio::test]
+    async fn check_once_ignores_excluded_symbol_drift() {
+        let mock = MockHlClient::new();
+        let master = Address::new("0xfeedface");
+        mock.seed_account(snap_with(
+            &master,
+            &[("ETH", dec!(0.1)), ("HYPE", dec!(10))],
+        ));
+        let mut excluded = HashSet::new();
+        excluded.insert(Symbol::new("ETH"));
+        let g = BaselineGuard::capture(
+            &mock,
+            master.clone(),
+            vec![None],
+            Duration::from_secs(60),
+            Decimal::ZERO,
+            excluded,
+        )
+        .await
+        .unwrap();
+        // ETH grew (algorithm built position) AND HYPE drifted. Only HYPE
+        // should be flagged.
+        mock.seed_account(snap_with(
+            &master,
+            &[("ETH", dec!(0.2)), ("HYPE", dec!(11))],
+        ));
+        let v = g.check_once(&mock).await.unwrap();
+        assert_eq!(v.len(), 1, "only HYPE should violate; got {v:?}");
+        assert_eq!(v[0].symbol, Symbol::new("HYPE"));
     }
 
     #[tokio::test]
