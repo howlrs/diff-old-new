@@ -29,6 +29,40 @@ Phase 3.5 で必須としていた A 〜 F は全て完了済。
       `post_info` / `post_exchange` で HTTP 429 を network error として扱っている。内部 token bucket で予防しているため v0.5.0 中は 0 hit だが、将来 burst が出たときに正しく backoff したい。
       影響: 本番運用の robustness
 
+## v0.5.1 候補 (2026-05-06 HYPE build session で表面化)
+
+PR-D10 と HYPE $3000 build を経て発見された改善点。詳細は各 issue 参照。
+
+- [x] **PR-D10. PASSIVE_FOLLOW cancel+place race 防止** (Issue #79, merged 5ac511b)
+      mainnet HYPE round 7 で実発生した 5.71 target → 11.03 約定の二重約定を、
+      `seen_open=true` の current_quote 残量を新 place sz から差し引く形で構造的に防止。
+      cancel は常に発行 (Gemini deep 指摘: skip すると価格追従の永久停止)。
+
+- [ ] **#78. PASSIVE_FOLLOW best touch からの price offset を AlgoParam で指定可能に**
+      `bid - mid * 0.01` のような passive オフセット注文を Python から指示可能に。
+      `passive_offset_bps` を `PassiveFollowParams` に追加 (~30 行 + tests)。
+
+- [ ] **#80. build script: aborted 時に abort_reason をログ出力**
+      no-fill / aborted の調査時に `curl /v1/exec/{id}` を叩く必要がある現状を解消。
+      → `scripts/close_passive.py` には先行反映済。build 系も対応する。
+
+- [ ] **#81. build script を `scripts/build_passive.py` として CLI 化**
+      `/tmp/build_*_v3*.py` の symbol/size/rounds/interval/master を CLI 化。
+      `scripts/close_passive.py` (close 用、本 session で作成) と対称な形にする。
+
+- [ ] **#82. docs(hl): HL Perp 残高 API フィールドと UI 値の対応表を追加**
+      `clearinghouseState.withdrawable=$0` を「資金不足」と機械的に判定する誤りを
+      未然防止。docs/specs に対応表を作る。HANDOFF §6.4 とメモリに反映済。
+
+- [ ] **#83. PASSIVE_FOLLOW max_total_ms 60s が短く no-fill 多発**
+      22 round 中 2 round が 60s 内に約定せず。Gemini 推奨は **案 B (動的化、
+      `max_total_ms = INTERVAL_S * 1000 // 3`)**。build script 側で先行実装可能。
+
+- [ ] **#84. executor-server: emergency_stop に symbol scope を追加**
+      orphan 検知時の `emergency_stop` が server 全体スコープのため、並列 build
+      で他 symbol を巻き込む。`POST /v1/emergency_stop {symbol: "HYPE"}` を新設。
+      TODO 3.10 の複数プロセス並列稼働の前提条件。
+
 ## 推奨 (Phase 3.5 から繰り越し、優先度低)
 
 - [ ] **3.2 ExecutionRegistry の TTL/prune** (PR-7 review)  
