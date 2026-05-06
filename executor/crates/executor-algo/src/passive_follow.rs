@@ -382,9 +382,32 @@ impl Algorithm for PassiveFollowAlgorithm {
                     continue;
                 }
 
-                // Cancel the previous quote (if any), then enqueue a new ALO
-                // at the current touch. Both go through the same BatchSender
-                // so they coalesce in the next 100 ms flush.
+                // PR-D10: cancel+place race による target 超過対策。
+                // current_quote (これから cancel する cloid) が **HL 側で
+                // 確実に resting している** (= seen_open=true) かつ部分 fill 後
+                // の残量を抱えている場合、その残量を差し引いた上で新 ALO を
+                // 出す。race で c1+c2 両方が約定しても合計 = remaining ≤ target
+                // となり超過は起きない。
+                //
+                // seen_open=false の場合は HL に届いていない可能性 (= reject /
+                // dropped frame) が高く、PR-D3 の reject_timeout 路線で扱う方が
+                // 安全 (race そのものが起きない)。`sz` は引かず従来挙動を維持。
+                //
+                // &current_quote で借用、後段の take() を壊さない (Gemini deep
+                // review 指摘)。
+                let prev_in_flight_sz: Decimal = current_quote
+                    .as_ref()
+                    .and_then(|(cloid, _)| local_in_flight.get(cloid))
+                    .filter(|e| e.seen_open)
+                    .map(|e| e.sz)
+                    .unwrap_or(Decimal::ZERO);
+                let new_sz = (remaining - prev_in_flight_sz).max(Decimal::ZERO);
+
+                // Cancel the previous quote (if any) — **常に発行**する。
+                // Gemini deep review (2026-05-06) 指摘: cancel まで skip すると
+                // 市場が動いても古い注文が残り続け、価格追従が永久停止する。
+                // 新 place は new_sz 判定で個別に skip できるが、cancel は触
+                // 移動を観測した時点で必ず enqueue。
                 if let Some((c, _)) = current_quote.take() {
                     let _ = ctx.batch.enqueue(OrderOrCancel::Cancel(CancelIntent {
                         symbol: ctx.symbol.clone(),
@@ -392,6 +415,21 @@ impl Algorithm for PassiveFollowAlgorithm {
                         by_oid: None,
                     }));
                 }
+
+                // 新規 place は new_sz が EPS を超える場合のみ。EPS 以下なら
+                // 既存 quote の残量だけで target が埋まる見込みのため、
+                // 次 tick で local_in_flight が drain されてから再判定する。
+                if new_sz <= IN_FLIGHT_EPS {
+                    tracing::warn!(
+                        prev_in_flight = %prev_in_flight_sz,
+                        remaining = %remaining,
+                        "passive_follow: skipping place to avoid target overshoot, \
+                         waiting for cancel to clear"
+                    );
+                    tokio::time::sleep(params.repost_poll).await;
+                    continue;
+                }
+
                 let cloid = Cloid::new();
                 own_cloids.insert(cloid);
                 let order = OrderIntent {
@@ -399,7 +437,7 @@ impl Algorithm for PassiveFollowAlgorithm {
                     symbol: ctx.symbol.clone(),
                     side,
                     px: new_touch,
-                    sz: remaining,
+                    sz: new_sz,
                     tif: Tif::Alo,
                     reduce_only: params.reduce_only,
                 };
@@ -418,7 +456,8 @@ impl Algorithm for PassiveFollowAlgorithm {
                 local_in_flight.insert(
                     cloid,
                     InFlight {
-                        sz: remaining,
+                        // PR-D10: 新 place の outstanding は new_sz (差し引き後)。
+                        sz: new_sz,
                         seen_open: false,
                         placed_at: tokio::time::Instant::now(),
                     },
@@ -1205,5 +1244,263 @@ mod tests {
 
         let _ = handle.shutdown.send(());
         let _ = handle.join.await;
+    }
+
+    /// PR-D10 regression: cancel+place race による target 超過の防御。
+    /// 2026-05-06 mainnet HYPE build round 7 で実発生したケースを再現する。
+    ///
+    /// 構成:
+    /// 1. c1 を `state.open_orders` に echo (seen_open=true)
+    /// 2. c1 が partial 0.3 fill (target 1.0 中 0.3 約定)
+    /// 3. touch を動かして algo に repost を強制
+    ///
+    /// 期待: 新 place の sz は `remaining (0.7) - prev_in_flight_sz (0.7) = 0`
+    ///       で EPS 以下 → place skip。c1 の cancel は出る。これにより HL 側
+    ///       で c1+c2 race が起きても合計 ≤ target が **構造的に保証** される。
+    #[tokio::test(start_paused = true)]
+    async fn passive_follow_race_cap_skips_place_after_partial_fill_and_repost() {
+        use executor_core::state::OpenOrder;
+
+        let symbol = Symbol::new("HYPE");
+        let state = Arc::new(AppState::new());
+        set_book(&state, &symbol, dec!(43.97), dec!(43.96)).await;
+
+        let mock = Arc::new(MockHlClient::new());
+        let (batch_sender, handle) = spawn_batch_sender(
+            mock.clone(),
+            BatchSenderConfig {
+                flush_interval: Duration::from_millis(20),
+                max_batch_size: 10,
+            },
+        );
+
+        // Mover: 200ms 後に bid を 1 tick 上げて algo に repost を要求する。
+        let mover_state = state.clone();
+        let mover_symbol = symbol.clone();
+        let mover = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            set_book(&mover_state, &mover_symbol, dec!(43.97), dec!(43.965)).await;
+        });
+
+        // Echoer: 全ての placed cloid を open_orders に push (seen_open=true 化)。
+        // 最初の cloid (c1) には partial 0.3 fill を 1 度だけ流す。後続の
+        // place が来てもそれは絶対に約定させない (検証対象は c2 が place
+        // されるか否か)。
+        let echoer_state = state.clone();
+        let echoer_mock = mock.clone();
+        let echoer_symbol = symbol.clone();
+        let target = dec!(1.0);
+        let partial = dec!(0.3);
+        let echoer = tokio::spawn(async move {
+            let mut handled: HashSet<Cloid> = HashSet::new();
+            let mut filled_partial = false;
+            for _ in 0..500 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let calls = echoer_mock.placed_calls();
+                let mut all_orders: Vec<_> = Vec::new();
+                for batch in &calls {
+                    for o in batch {
+                        all_orders.push(o.clone());
+                    }
+                }
+                for o in all_orders {
+                    if handled.contains(&o.cloid) {
+                        continue;
+                    }
+                    handled.insert(o.cloid);
+                    let mut g = echoer_state.open_orders.write().await;
+                    g.insert(
+                        o.cloid,
+                        OpenOrder {
+                            cloid: o.cloid,
+                            oid: None,
+                            symbol: echoer_symbol.clone(),
+                            side: o.side,
+                            px: o.px,
+                            sz: o.sz,
+                            filled_sz: Decimal::ZERO,
+                            tif: o.tif,
+                            reduce_only: o.reduce_only,
+                            placed_at: Utc::now(),
+                        },
+                    );
+                    drop(g);
+                    if !filled_partial {
+                        push_fill(
+                            &echoer_state,
+                            &echoer_symbol,
+                            o.cloid,
+                            o.side,
+                            o.px,
+                            partial,
+                        )
+                        .await;
+                        filled_partial = true;
+                    }
+                }
+            }
+        });
+
+        let (progress_tx, _progress_rx) = mpsc::channel::<Progress>(64);
+        let (_abort_tx, abort_rx) = watch::channel(false);
+
+        let mut algo = PassiveFollowAlgorithm::new();
+        let mut p = algo_params_no_freshness();
+        p.0.insert("repost_poll_ms".into(), serde_json::json!(50));
+        // Total: race が顕在化する 2 秒だけ走らせる (cancel ack のシミュレート無し
+        // のため reject_timeout には届かない)。
+        p.0.insert("max_total_ms".into(), serde_json::json!(2000));
+        let ctx = ExecutionContext {
+            exec_id: ExecutionId::new(),
+            symbol: symbol.clone(),
+            intent: Intent::Open,
+            target_size: target,
+            params: p,
+            state: state.clone(),
+            batch: batch_sender,
+            progress: progress_tx,
+            abort: abort_rx,
+        };
+
+        let algo_handle = tokio::spawn(async move { algo.run(ctx).await });
+        for _ in 0..200 {
+            tokio::time::advance(Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
+        }
+        let report = algo_handle.await.expect("join").expect("algo ok");
+        // partial 0.3 のみ約定。残 0.7 は race cap で place skip → max_total
+        // で abort が正常な期待動作。
+        assert!(report.aborted, "expected timeout abort");
+        assert_eq!(report.filled_size, partial, "only the partial should fill");
+
+        // PR-D10 の核心: c1 だけが置かれ、c2 (race の元) は EPS 判定で
+        // skip されているはず。`placed.len() == 1`。
+        let placed: Vec<_> = mock.placed_calls().into_iter().flatten().collect();
+        assert_eq!(
+            placed.len(),
+            1,
+            "race cap must skip c2 place after partial fill; got {} placed",
+            placed.len()
+        );
+        // 累積 = 0 < target (= 1.0 の 100% 約定にはならない)。
+        // race が起きていたら 0.3 + 0.7 + place(c2 sz=0.7) → 約定して target
+        // を超える可能性があった (mainnet 2026-05-06 r7 の事象と同型)。
+        // 本テストは「c2 が出ない」= race の元が断たれていることを検証する。
+        assert!(
+            mock.placed_calls()
+                .into_iter()
+                .flatten()
+                .all(|o| o.sz <= target),
+            "no individual place may exceed the original target"
+        );
+        // touch 移動への追従として cancel は最低 1 件出ているはず
+        // (Gemini deep review: cancel skip 禁止)。
+        let cancelled: Vec<_> = mock.cancelled_calls().into_iter().flatten().collect();
+        assert!(
+            !cancelled.is_empty(),
+            "cancel must always fire on touch move, even when place is skipped"
+        );
+
+        let _ = handle.shutdown.send(());
+        let _ = handle.join.await;
+        echoer.abort();
+        mover.abort();
+    }
+
+    /// PR-D10: seen_open=false (HL に届いていない or reject) の場合は
+    /// `prev_in_flight_sz` を差し引かない。これは PR-D3 の reject_timeout 路線
+    /// に委ねる設計。本テストは互換性: seen_open=false で partial fill が
+    /// 起きないシナリオでは、新 place の sz が `remaining` のまま出ること。
+    #[tokio::test(start_paused = true)]
+    async fn passive_follow_race_cap_inactive_when_prev_quote_not_seen_open() {
+        let symbol = Symbol::new("ETH");
+        let state = Arc::new(AppState::new());
+        set_book(&state, &symbol, dec!(2001), dec!(2000)).await;
+
+        let mock = Arc::new(MockHlClient::new());
+        let (batch_sender, handle) = spawn_batch_sender(
+            mock.clone(),
+            BatchSenderConfig {
+                flush_interval: Duration::from_millis(20),
+                max_batch_size: 10,
+            },
+        );
+
+        // Mover: 200ms で touch を動かす。
+        let mover_state = state.clone();
+        let mover_symbol = symbol.clone();
+        let mover = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            set_book(&mover_state, &mover_symbol, dec!(2001), dec!(2000.5)).await;
+        });
+
+        // Watcher: 2 番目の cloid だけ full fill。echo back せず seen_open=false。
+        let watcher_state = state.clone();
+        let watcher_mock = mock.clone();
+        let watcher_symbol = symbol.clone();
+        let watcher = tokio::spawn(async move {
+            let mut handled: HashSet<Cloid> = HashSet::new();
+            let mut count = 0u32;
+            for _ in 0..500 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let calls = watcher_mock.placed_calls();
+                let mut all_orders: Vec<_> = Vec::new();
+                for batch in &calls {
+                    for o in batch {
+                        all_orders.push(o.clone());
+                    }
+                }
+                for o in all_orders {
+                    if handled.contains(&o.cloid) {
+                        continue;
+                    }
+                    handled.insert(o.cloid);
+                    count += 1;
+                    if count >= 2 {
+                        push_fill(&watcher_state, &watcher_symbol, o.cloid, o.side, o.px, o.sz)
+                            .await;
+                    }
+                }
+            }
+        });
+
+        let (progress_tx, _progress_rx) = mpsc::channel::<Progress>(64);
+        let (_abort_tx, abort_rx) = watch::channel(false);
+
+        let mut algo = PassiveFollowAlgorithm::new();
+        let mut p = algo_params_no_freshness();
+        p.0.insert("repost_poll_ms".into(), serde_json::json!(50));
+        p.0.insert("max_total_ms".into(), serde_json::json!(5000));
+        let ctx = ExecutionContext {
+            exec_id: ExecutionId::new(),
+            symbol: symbol.clone(),
+            intent: Intent::Open,
+            target_size: dec!(0.5),
+            params: p,
+            state: state.clone(),
+            batch: batch_sender,
+            progress: progress_tx,
+            abort: abort_rx,
+        };
+
+        let algo_handle = tokio::spawn(async move { algo.run(ctx).await });
+        for _ in 0..500 {
+            tokio::time::advance(Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
+        }
+        let report = algo_handle.await.expect("join").expect("algo ok");
+        // seen_open=false で fill が来ない c1 は race cap の対象外、
+        // c2 が `remaining` 全量で出て full fill する従来挙動。
+        assert!(!report.aborted, "abort_reason = {:?}", report.abort_reason);
+        assert_eq!(report.filled_size, dec!(0.5));
+        let placed: Vec<_> = mock.placed_calls().into_iter().flatten().collect();
+        assert!(placed.len() >= 2);
+        // c2 は remaining (= 0.5) サイズで出た (= cap 不発動)。
+        assert_eq!(placed[1].sz, dec!(0.5));
+
+        let _ = handle.shutdown.send(());
+        let _ = handle.join.await;
+        watcher.abort();
+        mover.abort();
     }
 }
