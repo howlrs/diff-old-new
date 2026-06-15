@@ -5,6 +5,8 @@
 Hyperliquid (HIP-3 / Trade[XYZ]) 上の **米株指数 perpetual** と **オールド金融 (CME e-mini, NYSE/NASDAQ)** の **Oracle 二重構造** をデータで観測し、**closure (週末・CMEメンテ・祝日) 中の HL 独自価格発見** に由来するアルファを統計的に検証する。
 
 ## ステータス
+**Public TWAP monitor 追加 (v0.5.1)** — Hyperliquid official free API だけで、対象銘柄の TWAP 総額・TWAP share・BUY/SELL imbalance を current/past window 比較できる。詳細: [`docs/operations/hyperliquid-public-twap-monitor.md`](docs/operations/hyperliquid-public-twap-monitor.md)
+
 **Data audit pipeline 完備 (v0.4.0)** — Phase 1 詳細: [`docs/phase-1-report.md`](docs/phase-1-report.md), 履歴: [CHANGELOG](CHANGELOG.md)
 
 **Phase 3 進捗**: Rust executor 80% プロトタイプ完了 (PR-1〜PR-8 + docs).
@@ -43,6 +45,16 @@ marimo run  notebooks/dashboard.py                     # 発表モード
 cd executor && cargo run -p executor-server --release  # port 8085 で起動
 cargo run -p executor-cli -- health                    # 別 terminal で疎通確認
 # 詳細: docs/executor/README.md
+
+# Hyperliquid public TWAP monitor (official free API)
+.venv/bin/python scripts/hl_public_twap_monitor.py \
+  --coin HYPE \
+  --user-sample \
+  --discover-users recent-trades \
+  --sample-rank-by target_volume \
+  --sample-top-n 50 \
+  --sample-concurrency 1 \
+  --sample-report-mode all
 ```
 
 ## アーキテクチャ
@@ -94,6 +106,8 @@ python -m src.l1_collector
 Apache-2.0
 
 ## 関連ドキュメント
+- [Docs index](docs/README.md)
+- [Project overview](docs/PROJECT-OVERVIEW.md)
 - [v3 Design (本流)](docs/specs/2026-05-04-v3-design.md)
 - [Phase 0 仕様メモ](docs/specs/2026-05-04-phase0-spec-notes.md)
 

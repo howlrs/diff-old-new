@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## v0.5.1 — 2026-06-15 (Public TWAP monitor)
+
+Hyperliquid official free API だけで、対象銘柄に対する不特定多数の TWAP 実行量をサンプル推定する監視スクリプトを追加。
+
+### Added
+
+- `scripts/hl_public_twap_monitor.py`
+  - `recentTrades` から対象銘柄の直近アクティブユーザーを発見。
+  - `userTwapSliceFills` で selected users の TWAP slice fills を集計。
+  - `userFills` で selected users の対象銘柄全約定量を集計。
+  - 直近 1 時間 window と 12 時間前の 1 時間 window を比較。
+  - `--sample-rank-by`: `target_volume` / `target_fills` / `all_volume` / `all_fills` / `account_value` / `input_order`。
+  - `--sample-report-mode`: `twap-notional` / `twap-share` / `all`。
+
+### Docs
+
+- `docs/operations/hyperliquid-public-twap-monitor.md`
+- `docs/RELEASE-NOTES-v0.5.1.md`
+- `docs/HANDOFF-2026-06-15-v0.5.1.md`
+
+### Verification
+
+- `.venv/bin/python -m py_compile scripts/hl_public_twap_monitor.py`
+- `.venv/bin/ruff check scripts/hl_public_twap_monitor.py`
+- official free API で `twap-notional` / `twap-share` / `all` の小サンプル実行確認。
+
 ## v0.4.0 — 2026-05-04 (Data audit pipeline — 信頼性監査の体系化)
 
 戦略の前提となる **HL Oracle / 取得データの信頼性** を 4 層で体系的に監査する仕組み.
